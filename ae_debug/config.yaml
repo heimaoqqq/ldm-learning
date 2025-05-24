@@ -1,0 +1,28 @@
+# 最简自编码器调试配置
+
+dataset:
+  root_dir: "../dataset"   # 路径与主项目一致
+  batch_size: 16
+  num_workers: 4
+
+model:
+  in_channels: 3
+  latent_dim: 256
+  num_embeddings: 512
+  beta: 0.25
+  groups: 32
+
+training:
+  epochs: 100
+  lr: 0.0001
+  weight_decay: 0.00001
+  save_dir: "ae_debug_models"
+  rec_weight: 1.0          # 重建损失权重
+  vq_commit_weight: 1.0    # VQ commitment loss权重
+  perceptual_weight: 0.1   # 感知损失权重
+  gen_adv_weight: 0.1      # 生成器对抗损失权重
+  disc_train_interval: 5   # 每隔多少个batch训练一次判别器
+  save_interval: 20        # 每隔多少个epoch保存一次checkpoint
+  fid_eval_freq: 5         # 每隔多少个epoch计算一次FID
+  fid_sample_size: 1000    # 用于计算FID的样本数量
+  fid_batch_size: 32       # FID计算的批量大小 
