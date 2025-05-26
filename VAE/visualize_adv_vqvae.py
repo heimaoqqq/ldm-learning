@@ -14,19 +14,19 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"使用设备: {device}")
 
 # 加载数据
-_, test_loader, _, test_dataset_len = build_dataloader(
+_, val_loader, _, val_dataset_len = build_dataloader(
     config['dataset']['root_dir'],
     batch_size=8,
     num_workers=0,
     shuffle_train=False,
-    shuffle_test=False,
-    test_split=0.3
+    shuffle_val=False,
+    val_split=0.3
 )
 
-print(f"使用测试集进行可视化，测试集样本数: {test_dataset_len}")
+print(f"使用验证集进行可视化，验证集样本数: {val_dataset_len}")
 
 # 创建保存目录路径
-save_dir = os.path.join("ae_debug", "adv_vqvae_models")
+save_dir = config['training']['save_dir']
 vis_dir = os.path.join("ae_debug", "adv_vqvae_vis")
 
 # 初始化基于损失的模型
@@ -35,6 +35,7 @@ loss_model = AdvVQVAE(
     latent_dim=config['model']['latent_dim'],
     num_embeddings=config['model']['num_embeddings'],
     beta=config['model']['beta'],
+    decay=config['model'].get('vq_ema_decay', 0.99),  # 使用配置的 EMA 衰减率
     groups=config['model']['groups'],
     disc_ndf=64  # 判别器特征数量
 ).to(device)
@@ -45,6 +46,7 @@ fid_model = AdvVQVAE(
     latent_dim=config['model']['latent_dim'],
     num_embeddings=config['model']['num_embeddings'],
     beta=config['model']['beta'],
+    decay=config['model'].get('vq_ema_decay', 0.99),  # 使用配置的 EMA 衰减率
     groups=config['model']['groups'],
     disc_ndf=64  # 判别器特征数量
 ).to(device)
@@ -115,7 +117,7 @@ def create_comparison_plot(original_images, reconstructed_images, model_name, ba
 
 # 对抗训练VQ-VAE的可视化：为每个模型生成独立的比较图
 with torch.no_grad():
-    for i, (images, _) in enumerate(test_loader):
+    for i, (images, _) in enumerate(val_loader):
         if i >= 5:  # 只显示前5批次
             break
             
@@ -126,7 +128,7 @@ with torch.no_grad():
         norm_images = denormalize(images)
         
         # 基于损失的模型重建和可视化
-        loss_recon, _ = loss_model(images)
+        loss_recon, _, _ = loss_model(images)
         loss_recon = denormalize(loss_recon)
         loss_image_path = os.path.join(vis_dir, f"adv_vqvae_loss_batch_{i+1}.png")
         create_comparison_plot(
@@ -140,7 +142,7 @@ with torch.no_grad():
         
         # 如果有基于FID的模型，也生成其对应的比较图
         if has_fid_model:
-            fid_recon, _ = fid_model(images)
+            fid_recon, _, _ = fid_model(images)
             fid_recon = denormalize(fid_recon)
             fid_image_path = os.path.join(vis_dir, f"adv_vqvae_fid_batch_{i+1}.png")
             create_comparison_plot(

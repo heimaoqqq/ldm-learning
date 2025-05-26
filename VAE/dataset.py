@@ -22,7 +22,7 @@ class GaitDataset(Dataset):
         label = self.class_ids[idx]
         return image, label
 
-def build_dataloader(root_dir, batch_size=8, num_workers=2, shuffle_train=True, shuffle_test=False, test_split=0.3, random_state=42):
+def build_dataloader(root_dir, batch_size=8, num_workers=2, shuffle_train=True, shuffle_val=False, val_split=0.3, random_state=42):
     transform = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
@@ -57,24 +57,24 @@ def build_dataloader(root_dir, batch_size=8, num_workers=2, shuffle_train=True, 
         if not all_image_paths:
             raise ValueError(f"在目录 {root_dir} 中解析后没有有效的 .jpg 文件")
 
-    # 2. 划分数据集
-    train_paths, test_paths, train_ids, test_ids = train_test_split(
-        all_image_paths, all_class_ids, test_size=test_split, random_state=random_state, stratify=all_class_ids
+    # 2. 划分数据集为训练集和验证集
+    train_paths, val_paths, train_ids, val_ids = train_test_split(
+        all_image_paths, all_class_ids, test_size=val_split, random_state=random_state, stratify=all_class_ids
     )
 
     print(f"数据集划分完成:")
     print(f"  总样本数: {len(all_image_paths)}")
     print(f"  训练集样本数: {len(train_paths)}")
-    print(f"  测试集样本数: {len(test_paths)}")
+    print(f"  验证集样本数: {len(val_paths)}")
     if len(all_image_paths) > 0:
         print(f"  训练集比例: {len(train_paths)/len(all_image_paths):.2f}")
-        print(f"  测试集比例: {len(test_paths)/len(all_image_paths):.2f}")
+        print(f"  验证集比例: {len(val_paths)/len(all_image_paths):.2f}")
 
     # 3. 创建 Dataset 和 DataLoader
     train_dataset = GaitDataset(train_paths, train_ids, transform=transform)
-    test_dataset = GaitDataset(test_paths, test_ids, transform=transform)
+    val_dataset = GaitDataset(val_paths, val_ids, transform=transform)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle_test, num_workers=num_workers, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=shuffle_val, num_workers=num_workers, pin_memory=True)
     
-    return train_loader, test_loader, len(train_dataset), len(test_dataset) 
+    return train_loader, val_loader, len(train_dataset), len(val_dataset) 

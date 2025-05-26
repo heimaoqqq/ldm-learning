@@ -1,0 +1,66 @@
+# CLDM (条件潜扩散模型) 配置文件
+
+# 数据集配置
+dataset:
+  root_dir: "/kaggle/input/dataset/dataset"   # 数据集路径
+  batch_size: 8                               # 适合16GB GPU的批量大小
+  num_workers: 4
+  num_classes: 31                             # ID_1 到 ID_31
+
+# VQ-VAE相关配置（用于加载预训练模型）
+vqvae:
+  model_path: "../VAE/models/adv_vqvae_best_loss.pth"  # 预训练VQ-VAE权重路径
+  in_channels: 3
+  latent_dim: 256
+  num_embeddings: 512
+  beta: 0.25
+  decay: 0.99
+  groups: 32
+
+# CLDM模型配置
+cldm:
+  latent_dim: 256                            # 与VQ-VAE的潜空间维度一致
+  num_classes: 31                            # 类别数量
+  
+  # DDPM扩散过程配置
+  num_timesteps: 1000                        # 扩散步数
+  beta_start: 0.0001                         # 起始噪声方差
+  beta_end: 0.02                             # 终止噪声方差
+  
+  # U-Net网络结构配置
+  time_emb_dim: 128                          # 时间嵌入维度
+  class_emb_dim: 64                          # 类别嵌入维度
+  base_channels: 128                         # 基础通道数
+  groups: 32                                 # GroupNorm的组数
+
+# 训练配置
+training:
+  epochs: 200                                # 训练轮数
+  lr: 1e-4                                   # 学习率
+  weight_decay: 1e-6                         # 权重衰减
+  
+  # 学习率调度
+  use_scheduler: true
+  scheduler_type: "cosine"                   # cosine, linear, step
+  warmup_epochs: 10                          # 预热轮数
+  
+  # 梯度相关
+  grad_clip_norm: 1.0                        # 梯度裁剪
+  
+  # 验证和保存
+  val_interval: 5                            # 验证间隔
+  save_interval: 20                          # 保存间隔
+  sample_interval: 10                        # 采样可视化间隔
+  
+  # 评估配置
+  fid_eval_freq: 20                          # FID评估频率
+  num_sample_images: 16                      # 采样图像数量
+  
+  # 保存路径
+  save_dir: "models"                         # 模型保存目录
+
+# 系统配置
+system:
+  device: "cuda"                             # 设备
+  mixed_precision: true                      # 混合精度训练
+  seed: 42                                   # 随机种子 

@@ -1,8 +1,0 @@
-torch
-torchvision
-tqdm
-pyyaml
-matplotlib
-Pillow
-scikit-learn 
-torch-fidelity 
