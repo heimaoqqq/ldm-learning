@@ -2,14 +2,14 @@
 
 # 数据集配置
 dataset:
-  root_dir: "/kaggle/input/dataset"   # 数据集路径
+  root_dir: "/kaggle/input/dataset/dataset"   # 数据集路径
   batch_size: 8                               # 适合16GB GPU的批量大小
-  num_workers: 4
+  num_workers: 4                              # 提升数据加载效率（如有问题改为2）
   num_classes: 31                             # ID_1 到 ID_31
 
 # VQ-VAE相关配置（用于加载预训练模型）
 vqvae:
-  model_path: "/kaggle/input/adv-vqvae-best-fid-pth/adv_vqvae_best_fid.pth"  # 预训练VQ-VAE权重路径
+  model_path: "/kaggle/input/adv-vqvae-best-fid-pth/adv_vqvae_best_fid.pth"  # Kaggle环境中的VQ-VAE权重路径（FID最佳模型）
   in_channels: 3
   latent_dim: 256
   num_embeddings: 512
@@ -33,31 +33,31 @@ cldm:
   base_channels: 128                         # 基础通道数
   groups: 32                                 # GroupNorm的组数
 
-# 训练配置
+# 训练配置 - 高质量生成优化
 training:
-  epochs: 200                                # 训练轮数
-  lr: 1e-4                                   # 学习率
+  epochs: 200                                # 训练轮数（测试配置）
+  lr: 1e-4                                   # 学习率（标准设置）
   weight_decay: 1e-6                         # 权重衰减
   
   # 学习率调度
   use_scheduler: true
   scheduler_type: "cosine"                   # cosine, linear, step
-  warmup_epochs: 10                          # 预热轮数
+  warmup_epochs: 10                          # 预热轮数（标准设置）
   
   # 梯度相关
   grad_clip_norm: 1.0                        # 梯度裁剪
   
-  # 验证和保存
+  # 验证和保存（高质量训练优化）
   val_interval: 5                            # 验证间隔
   save_interval: 20                          # 保存间隔
   sample_interval: 10                        # 采样可视化间隔
   
   # 评估配置
-  fid_eval_freq: 20                          # FID评估频率
+  fid_eval_freq: 5                           # FID评估频率（更频繁监控质量）
   num_sample_images: 16                      # 采样图像数量
   
   # 保存路径
-  save_dir: "models"                         # 模型保存目录
+  save_dir: "/kaggle/working/cldm_models"    # Kaggle工作目录
 
 # 系统配置
 system:
