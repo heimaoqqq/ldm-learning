@@ -36,9 +36,13 @@ try:
 except ImportError:
     print("警告: 无法导入torch-fidelity库，无法计算FID")
 
-def load_config():
+def load_config(config_name='config.yaml'):
     """加载配置文件"""
-    config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
+    config_path = os.path.join(os.path.dirname(__file__), config_name)
+    if not os.path.exists(config_path):
+        # 如果指定配置文件不存在，尝试默认配置
+        config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
+    print(f"加载配置文件: {config_path}")
     with open(config_path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
 
@@ -192,8 +196,14 @@ def calculate_fid_score(cldm_model, vqvae_model, val_loader, sample_size=500):
         return float('inf')
 
 def main():
-    # 加载配置
-    config = load_config()
+    # 加载配置（支持命令行参数指定配置文件）
+    import sys
+    if len(sys.argv) > 1:
+        config_name = sys.argv[1]
+        print(f"使用指定配置文件: {config_name}")
+    else:
+        config_name = 'config.yaml'
+    config = load_config(config_name)
     
     # 设置随机种子
     set_seed(config['system']['seed'])
@@ -272,12 +282,23 @@ def main():
     print(f"  模型大小约: {total_params * 4 / 1024 / 1024:.1f} MB")
     
     # 创建优化器
-    optimizer = optim.AdamW(
-        cldm.parameters(),
-        lr=config['training']['lr'],
-        weight_decay=config['training']['weight_decay'],
-        betas=(0.9, 0.999)
-    )
+    try:
+        optimizer = optim.AdamW(
+            cldm.parameters(),
+            lr=config['training']['lr'],
+            weight_decay=config['training']['weight_decay'],
+            betas=(0.9, 0.999)
+        )
+        print("使用AdamW优化器")
+    except Exception as e:
+        print(f"AdamW创建失败: {e}")
+        print("回退到Adam优化器")
+        optimizer = optim.Adam(
+            cldm.parameters(),
+            lr=config['training']['lr'],
+            weight_decay=config['training']['weight_decay'],
+            betas=(0.9, 0.999)
+        )
     
     # 学习率调度器
     use_scheduler = config['training']['use_scheduler']
