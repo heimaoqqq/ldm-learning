@@ -2,7 +2,7 @@
 
 # 数据集配置
 dataset:
-  root_dir: "/kaggle/input/dataset/dataset"   # 数据集路径
+  root_dir: "/kaggle/input/dataset"   # 数据集路径
   batch_size: 8                               # 适合16GB GPU的批量大小
   num_workers: 4
   num_classes: 31                             # ID_1 到 ID_31
