@@ -9,7 +9,7 @@ dataset:
 
 # VQ-VAE相关配置（用于加载预训练模型）
 vqvae:
-  model_path: "../VAE/models/adv_vqvae_best_loss.pth"  # 预训练VQ-VAE权重路径
+  model_path: "/kaggle/working/ldm-learning/VAE/ae_debug_models/adv_vqvae_best_fid.pth"  # 预训练VQ-VAE权重路径
   in_channels: 3
   latent_dim: 256
   num_embeddings: 512
