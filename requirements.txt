@@ -10,6 +10,7 @@ pyyaml>=6.0
 
 # 模型评估和可视化
 tensorboard>=2.6.0
+torchmetrics[image]>=1.0.0
 torch-fidelity==0.3.0
 lpips>=0.1.4
 opencv-python>=4.5.4 
