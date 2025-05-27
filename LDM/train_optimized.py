@@ -87,7 +87,7 @@ def extract_latent_features(vqvae_model, dataloader, device, max_samples=None):
             
             # VQ-VAE编码
             z_e = vqvae_model.encoder(images)
-            z_q, _, _ = vqvae_model.quantize(z_e)
+            z_q, _, _ = vqvae_model.vq(z_e)
             
             all_latents.append(z_q.cpu())
             all_labels.append(labels.cpu())
