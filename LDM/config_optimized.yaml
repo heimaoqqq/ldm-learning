@@ -30,10 +30,10 @@ cldm:
   beta_end: 0.02
   noise_schedule: "cosine"         # cosine调度效果更好
   
-  # U-Net架构配置 - 平衡性能和效果
-  time_emb_dim: 512
-  class_emb_dim: 256
-  base_channels: 128               # 适中的通道数
+  # U-Net架构配置 - 内存优化
+  time_emb_dim: 256                # 降低时间嵌入维度
+  class_emb_dim: 128               # 降低类别嵌入维度
+  base_channels: 96                # 降低基础通道数节省内存
   dropout: 0.1                     # 防止过拟合
   groups: 32
 
