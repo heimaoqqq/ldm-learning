@@ -127,12 +127,14 @@ def calculate_fid_score(cldm_model, vqvae_model, val_loader, config, device):
         cldm_model.eval()
         vqvae_model.eval()
         
-        sample_size = min(config['training']['num_sample_images'], 500)  # 限制最大样本数
-        sampling_steps = config['training']['fid_sampling_steps']
+        sample_size = min(config['training']['num_sample_images'], 200)  # 进一步限制样本数
+        sampling_steps = min(config['training']['fid_sampling_steps'], 20)  # 强制限制采样步数
         eta = config['training']['eta']
         
         sample_count = 0
         batch_size_fid = 1  # FID计算时使用小batch避免内存问题
+        
+        print(f"FID设置: 样本数={sample_size}, 采样步数={sampling_steps}")
         
         with torch.no_grad():
             for images, labels in tqdm(val_loader, desc="FID采样"):
@@ -166,6 +168,10 @@ def calculate_fid_score(cldm_model, vqvae_model, val_loader, config, device):
                     # 清理GPU内存
                     del img, lbl, generated_z, gen_img, real_uint8, gen_uint8
                     torch.cuda.empty_cache()
+                    
+                    # 显示进度
+                    if sample_count % 50 == 0:
+                        print(f"  FID采样进度: {sample_count}/{sample_size}")
             
             print(f"FID评估: 处理了 {sample_count} 个样本")
             
@@ -444,9 +450,15 @@ def main():
             
             pbar.set_postfix({'loss': f"{loss.item():.6f}"})
             
-            # 定期清理内存
-            if num_batches % 10 == 0:
+            # 更频繁的内存清理
+            if num_batches % 5 == 0:
                 clear_gpu_memory()
+                
+            # 显示内存使用情况
+            if num_batches % 50 == 0 and torch.cuda.is_available():
+                memory_used = torch.cuda.memory_allocated() / 1024**3
+                memory_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                print(f"  GPU内存: {memory_used:.2f}/{memory_total:.1f} GB")
         
         avg_train_loss = running_loss / num_batches
         clear_gpu_memory()  # 每个epoch结束后清理内存
