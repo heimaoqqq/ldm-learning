@@ -96,8 +96,9 @@ def sample_and_visualize(cldm_model, vqvae_model, epoch, config, device):
     class_labels = torch.tensor(class_labels, device=device)
     
     with torch.no_grad():
-        # 生成潜在向量
-        generated_z = cldm_model.sample(class_labels, device)
+        # 生成潜在向量（使用配置中的DDIM步数）
+        sampling_steps = config['training'].get('sampling_steps', 100)
+        generated_z = cldm_model.sample(class_labels, device, sampling_steps=sampling_steps)
         
         # 通过VQ-VAE解码器生成图像
         generated_images = vqvae_model.decoder(generated_z)
@@ -156,8 +157,8 @@ def calculate_fid_score(cldm_model, vqvae_model, val_loader, sample_size=500):
                 labels = labels.to(device)
                 batch_size = images.size(0)
                 
-                # 生成对应的潜在向量
-                generated_z = cldm_model.sample(labels, device)
+                # 生成对应的潜在向量（使用DDIM加速）
+                generated_z = cldm_model.sample(labels, device, sampling_steps=50)  # FID计算时用50步加速
                 generated_images = vqvae_model.decoder(generated_z)
                 
                 # 反归一化
