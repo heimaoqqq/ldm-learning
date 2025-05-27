@@ -21,9 +21,9 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # 导入自定义模块
-sys.path.append('/kaggle/input/advanced-vqvae')
-from ae_debug.adv_vq_vae import AdvVQVAE
-from build_dataloader import build_dataloader
+sys.path.append('../VAE')  # 添加VAE目录到路径
+from adv_vq_vae import AdvVQVAE
+from dataset import build_dataloader
 
 # 导入优化版本的CLDM
 from cldm_optimized import ImprovedCLDM
