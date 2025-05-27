@@ -34,25 +34,27 @@ try:
     from torch.cuda.amp import autocast, GradScaler
 except ImportError:
     HAS_AMP = False
-    print("⚠️ 无法导入AMP，使用常规精度训练")
+    print("警告: 无法导入AMP，使用常规精度训练")
 
-HAS_FIDELITY = True
+# 导入torchmetrics用于准确的FID计算
 try:
     from torchmetrics.image.fid import FrechetInceptionDistance
     import torchmetrics
+    HAS_TORCHMETRICS = True
 except ImportError:
-    HAS_FIDELITY = False
-    print("⚠️ 无法导入torchmetrics，将跳过FID计算")
+    HAS_TORCHMETRICS = False
+    print("错误: 无法导入torchmetrics，FID计算将被跳过")
+    print("请安装: pip install torchmetrics")
 
 def load_config(config_path):
     """加载配置文件"""
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
-        print(f"✅ 成功加载配置文件: {config_path}")
+        print(f"成功加载配置文件: {config_path}")
         return config
     except Exception as e:
-        print(f"❌ 配置文件加载失败: {e}")
+        print(f"配置文件加载失败: {e}")
         sys.exit(1)
 
 def set_seed(seed):
@@ -62,11 +64,13 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    print(f"🌱 设置随机种子: {seed}")
+    print(f"设置随机种子: {seed}")
 
 def denormalize(x):
     """反归一化 [-1,1] -> [0,1]"""
     return (x + 1) / 2
+
+
 
 def extract_latent_features(vqvae_model, dataloader, device, max_samples=None):
     """从VQ-VAE提取潜在特征"""
@@ -75,7 +79,7 @@ def extract_latent_features(vqvae_model, dataloader, device, max_samples=None):
     all_labels = []
     
     sample_count = 0
-    print("📊 提取VQ-VAE潜在特征...")
+    print("提取VQ-VAE潜在特征...")
     
     with torch.no_grad():
         for images, labels in tqdm(dataloader, desc="提取特征"):
@@ -97,16 +101,18 @@ def extract_latent_features(vqvae_model, dataloader, device, max_samples=None):
     latents = torch.cat(all_latents, dim=0)
     labels = torch.cat(all_labels, dim=0)
     
-    print(f"✅ 提取完成: {latents.shape[0]} 个潜在特征，形状: {latents.shape}")
+    print(f"提取完成: {latents.shape[0]} 个潜在特征，形状: {latents.shape}")
     return latents, labels
 
 def calculate_fid_score(cldm_model, vqvae_model, val_loader, config, device):
-    """计算高质量FID分数"""
-    if not HAS_FIDELITY:
+    """计算高质量FID分数 - 使用torchmetrics.FrechetInceptionDistance"""
+    
+    if not HAS_TORCHMETRICS:
+        print("跳过FID计算: torchmetrics未安装")
         return float('inf')
     
     try:
-        print("🧮 计算FID分数...")
+        print("计算FID分数 (使用torchmetrics)...")
         
         # 初始化FID度量
         fid_metric = FrechetInceptionDistance(feature=2048, normalize=True)
@@ -115,7 +121,7 @@ def calculate_fid_score(cldm_model, vqvae_model, val_loader, config, device):
         cldm_model.eval()
         vqvae_model.eval()
         
-        sample_size = config['training']['num_sample_images']
+        sample_size = min(1000, config['training']['num_sample_images'])  # 使用足够的样本确保准确性
         sampling_steps = config['training']['fid_sampling_steps']
         eta = config['training']['eta']
         
@@ -138,7 +144,7 @@ def calculate_fid_score(cldm_model, vqvae_model, val_loader, config, device):
                 )
                 gen_images = vqvae_model.decoder(generated_z)
                 
-                # 转换为[0,255]格式
+                # 转换为[0,255] uint8格式
                 real_uint8 = ((denormalize(images) * 255).clamp(0, 255).to(torch.uint8))
                 gen_uint8 = ((denormalize(gen_images) * 255).clamp(0, 255).to(torch.uint8))
                 
@@ -153,7 +159,7 @@ def calculate_fid_score(cldm_model, vqvae_model, val_loader, config, device):
             
             print(f"FID评估: 真实图像 {real_all.shape[0]}, 生成图像 {gen_all.shape[0]}")
             
-            # 计算FID
+            # 计算FID - 使用标准的InceptionV3特征
             fid_metric.update(real_all.to(device), real=True)
             fid_metric.update(gen_all.to(device), real=False)
             fid_score = fid_metric.compute().item()
@@ -162,7 +168,7 @@ def calculate_fid_score(cldm_model, vqvae_model, val_loader, config, device):
         return fid_score
         
     except Exception as e:
-        print(f"❌ FID计算出错: {e}")
+        print(f"FID计算出错: {e}")
         return float('inf')
 
 def sample_and_save(cldm_model, vqvae_model, config, device, epoch, save_dir):
@@ -173,7 +179,7 @@ def sample_and_save(cldm_model, vqvae_model, config, device, epoch, save_dir):
     num_classes = config['dataset']['num_classes']
     samples_per_class = 2
     
-    print(f"🎨 生成第{epoch}轮采样图像...")
+    print(f"生成第{epoch}轮采样图像...")
     
     all_samples = []
     
@@ -204,6 +210,35 @@ def sample_and_save(cldm_model, vqvae_model, config, device, epoch, save_dir):
     
     cldm_model.train()
 
+def validate_model(cldm_model, val_latents, val_labels, device, config):
+    """在验证集上评估模型性能"""
+    cldm_model.eval()
+    val_loss = 0.0
+    val_batches = 0
+    
+    # 创建验证数据加载器
+    from torch.utils.data import TensorDataset, DataLoader
+    val_dataset = TensorDataset(val_latents, val_labels)
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=config['dataset']['batch_size'], 
+        shuffle=False,
+        num_workers=0
+    )
+    
+    with torch.no_grad():
+        for z_0, class_labels in val_loader:
+            z_0 = z_0.to(device)
+            class_labels = class_labels.to(device)
+            
+            loss = cldm_model(z_0, class_labels)
+            val_loss += loss.item()
+            val_batches += 1
+    
+    avg_val_loss = val_loss / val_batches
+    cldm_model.train()
+    return avg_val_loss
+
 def main():
     parser = argparse.ArgumentParser(description="优化版本CLDM训练")
     parser.add_argument('--config', default='config_optimized.yaml', help='配置文件路径')
@@ -216,7 +251,7 @@ def main():
     # 设置环境
     set_seed(config['system']['seed'])
     device = torch.device(config['system']['device'] if torch.cuda.is_available() else 'cpu')
-    print(f"🖥️ 使用设备: {device}")
+    print(f"使用设备: {device}")
     
     if device.type == 'cuda':
         print(f"GPU: {torch.cuda.get_device_name(0)}")
@@ -233,7 +268,7 @@ def main():
         yaml.dump(config, f, default_flow_style=False)
     
     # 构建数据加载器
-    print("📚 加载数据集...")
+    print("加载数据集...")
     train_loader, val_loader, train_size, val_size = build_dataloader(
         config['dataset']['root_dir'],
         batch_size=config['dataset']['batch_size'],
@@ -243,14 +278,14 @@ def main():
         val_split=0.3
     )
     
-    print(f"📊 数据集统计:")
+    print(f"数据集统计:")
     print(f"  训练集: {train_size} 样本")
     print(f"  验证集: {val_size} 样本")
     print(f"  类别数: {config['dataset']['num_classes']}")
     print(f"  批次大小: {config['dataset']['batch_size']}")
     
     # 加载VQ-VAE模型
-    print("🔧 加载VQ-VAE模型...")
+    print("加载VQ-VAE模型...")
     vqvae = AdvVQVAE(
         in_channels=config['vqvae']['in_channels'],
         latent_dim=config['vqvae']['latent_dim'],
@@ -263,9 +298,9 @@ def main():
     vqvae_path = config['vqvae']['model_path']
     if os.path.exists(vqvae_path):
         vqvae.load_state_dict(torch.load(vqvae_path, map_location=device))
-        print(f"✅ VQ-VAE权重加载成功")
+        print(f"VQ-VAE权重加载成功")
     else:
-        print(f"❌ VQ-VAE权重文件不存在: {vqvae_path}")
+        print(f"VQ-VAE权重文件不存在: {vqvae_path}")
         return
     
     # 冻结VQ-VAE
@@ -274,7 +309,7 @@ def main():
         param.requires_grad = False
     
     # 创建优化版本CLDM模型
-    print("🚀 创建优化版CLDM模型...")
+    print("创建优化版CLDM模型...")
     cldm = ImprovedCLDM(
         latent_dim=config['cldm']['latent_dim'],
         num_classes=config['cldm']['num_classes'],
@@ -292,7 +327,7 @@ def main():
     # 模型统计
     total_params = sum(p.numel() for p in cldm.parameters())
     trainable_params = sum(p.numel() for p in cldm.parameters() if p.requires_grad)
-    print(f"📈 模型统计:")
+    print(f"模型统计:")
     print(f"  总参数量: {total_params:,}")
     print(f"  可训练参数: {trainable_params:,}")
     print(f"  模型大小: {total_params * 4 / 1024 / 1024:.1f} MB")
@@ -319,7 +354,7 @@ def main():
                 return min_lr_ratio + (1.0 - min_lr_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
         
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-        print("📚 使用Cosine学习率调度器")
+        print("使用Cosine学习率调度器")
     else:
         scheduler = None
     
@@ -327,7 +362,7 @@ def main():
     use_amp = config['system']['mixed_precision'] and HAS_AMP
     if use_amp:
         scaler = GradScaler()
-        print("⚡ 启用混合精度训练")
+        print("启用混合精度训练")
     else:
         scaler = None
     
@@ -337,7 +372,7 @@ def main():
     best_loss = float('inf')
     
     if args.resume and os.path.exists(args.resume):
-        print(f"🔄 从checkpoint恢复训练: {args.resume}")
+        print(f"从checkpoint恢复训练: {args.resume}")
         checkpoint = torch.load(args.resume, map_location=device)
         cldm.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -347,14 +382,15 @@ def main():
         best_fid = checkpoint.get('best_fid', float('inf'))
         best_loss = checkpoint.get('best_loss', float('inf'))
     
-    # 提取训练数据的潜在特征
+    # 提取训练和验证数据的潜在特征
     train_latents, train_labels = extract_latent_features(vqvae, train_loader, device)
+    val_latents, val_labels = extract_latent_features(vqvae, val_loader, device)
     
     # 创建潜在特征数据加载器
     from torch.utils.data import TensorDataset, DataLoader
-    latent_dataset = TensorDataset(train_latents, train_labels)
-    latent_loader = DataLoader(
-        latent_dataset,
+    train_dataset = TensorDataset(train_latents, train_labels)
+    train_latent_loader = DataLoader(
+        train_dataset,
         batch_size=config['dataset']['batch_size'],
         shuffle=True,
         num_workers=0,
@@ -362,9 +398,10 @@ def main():
     )
     
     # 训练循环
-    print(f"🎯 开始训练优化版CLDM...")
+    print(f"开始训练优化版CLDM...")
     print(f"训练轮数: {config['training']['epochs']}")
     print(f"从第 {start_epoch + 1} 轮开始")
+    print(f"验证集将用于模型评估和最佳模型保存")
     
     for epoch in range(start_epoch, config['training']['epochs']):
         # 训练阶段
@@ -372,7 +409,7 @@ def main():
         running_loss = 0.0
         num_batches = 0
         
-        pbar = tqdm(latent_loader, desc=f"Epoch {epoch+1}/{config['training']['epochs']}")
+        pbar = tqdm(train_latent_loader, desc=f"Epoch {epoch+1}/{config['training']['epochs']}")
         for z_0, class_labels in pbar:
             z_0 = z_0.to(device)
             class_labels = class_labels.to(device)
@@ -407,34 +444,11 @@ def main():
         
         current_lr = optimizer.param_groups[0]['lr']
         
-        # 验证阶段
+        # 验证阶段 - 使用预先提取的验证集特征
         if (epoch + 1) % config['training']['val_interval'] == 0:
-            cldm.eval()
-            val_loss = 0.0
-            val_batches = 0
+            avg_val_loss = validate_model(cldm, val_latents, val_labels, device, config)
             
-            # 验证集潜在特征
-            val_latents, val_labels = extract_latent_features(vqvae, val_loader, device, max_samples=1000)
-            val_dataset = TensorDataset(val_latents, val_labels)
-            val_latent_loader = DataLoader(val_dataset, batch_size=config['dataset']['batch_size'], shuffle=False)
-            
-            with torch.no_grad():
-                for z_0, class_labels in val_latent_loader:
-                    z_0 = z_0.to(device)
-                    class_labels = class_labels.to(device)
-                    
-                    if use_amp:
-                        with autocast():
-                            loss = cldm(z_0, class_labels)
-                    else:
-                        loss = cldm(z_0, class_labels)
-                    
-                    val_loss += loss.item()
-                    val_batches += 1
-            
-            avg_val_loss = val_loss / val_batches
-            
-            print(f"\n📊 Epoch {epoch+1} 结果:")
+            print(f"\nEpoch {epoch+1} 结果:")
             print(f"  训练损失: {avg_train_loss:.6f}")
             print(f"  验证损失: {avg_val_loss:.6f}")
             print(f"  学习率: {current_lr:.8f}")
@@ -443,19 +457,19 @@ def main():
             if avg_val_loss < best_loss:
                 best_loss = avg_val_loss
                 torch.save(cldm.state_dict(), os.path.join(save_dir, 'cldm_best_loss.pth'))
-                print(f"  ✅ 保存最佳损失模型: {best_loss:.6f}")
+                print(f"  保存最佳损失模型: {best_loss:.6f}")
         else:
             print(f"\nEpoch {epoch+1}: 训练损失 {avg_train_loss:.6f}, 学习率 {current_lr:.8f}")
         
-        # FID评估
-        if (epoch + 1) % config['training']['fid_eval_freq'] == 0 and HAS_FIDELITY:
+        # FID评估 - 使用验证集
+        if (epoch + 1) % config['training']['fid_eval_freq'] == 0:
             fid_score = calculate_fid_score(cldm, vqvae, val_loader, config, device)
-            print(f"  🎯 FID分数: {fid_score:.4f}")
+            print(f"  FID分数: {fid_score:.4f}")
             
             if fid_score < best_fid:
                 best_fid = fid_score
                 torch.save(cldm.state_dict(), os.path.join(save_dir, 'cldm_best_fid.pth'))
-                print(f"  🏆 保存最佳FID模型: {best_fid:.4f}")
+                print(f"  保存最佳FID模型: {best_fid:.4f}")
         
         # 生成采样
         if (epoch + 1) % config['training']['sample_interval'] == 0:
@@ -475,17 +489,16 @@ def main():
                 checkpoint['scheduler_state_dict'] = scheduler.state_dict()
             
             torch.save(checkpoint, os.path.join(save_dir, 'checkpoints', f'epoch_{epoch+1:03d}.pth'))
-            print(f"  💾 保存checkpoint")
+            print(f"  保存checkpoint")
     
     # 训练完成
-    print(f"\n🎉 训练完成！")
+    print(f"\n训练完成！")
     print(f"最佳验证损失: {best_loss:.6f}")
-    if HAS_FIDELITY:
-        print(f"最佳FID分数: {best_fid:.4f}")
+    print(f"最佳FID分数: {best_fid:.4f}")
     
     # 最终采样
     sample_and_save(cldm, vqvae, config, device, "final", save_dir)
-    print(f"🎨 最终样本已保存")
+    print(f"最终样本已保存")
 
 if __name__ == "__main__":
     main() 
