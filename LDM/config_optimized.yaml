@@ -4,8 +4,8 @@
 # 数据集配置
 dataset:
   root_dir: "/kaggle/input/dataset"
-  batch_size: 4                    # 适合优化模型的batch size
-  num_workers: 4
+  batch_size: 2                    # 减少内存使用
+  num_workers: 2
   num_classes: 31
 
 # VQ-VAE配置（预训练模型）
@@ -30,10 +30,10 @@ cldm:
   beta_end: 0.02
   noise_schedule: "cosine"         # cosine调度效果更好
   
-  # U-Net架构配置 - 内存优化
-  time_emb_dim: 256                # 降低时间嵌入维度
-  class_emb_dim: 128               # 降低类别嵌入维度
-  base_channels: 96                # 降低基础通道数节省内存
+  # U-Net架构配置 - 激进内存优化
+  time_emb_dim: 128                # 大幅降低时间嵌入维度
+  class_emb_dim: 64                # 大幅降低类别嵌入维度
+  base_channels: 64                # 大幅降低基础通道数
   dropout: 0.1                     # 防止过拟合
   groups: 32
 
@@ -57,11 +57,11 @@ training:
   save_interval: 20
   sample_interval: 10
   
-  # FID评估配置 - 关键改进
-  fid_eval_freq: 5
-  num_sample_images: 1000          # 增加采样数量
-  sampling_steps: 200              # 高质量采样
-  fid_sampling_steps: 200          # FID计算采样步数
+  # FID评估配置 - 激进优化
+  fid_eval_freq: 15                # 大幅降低FID评估频率
+  num_sample_images: 200           # 大幅减少采样数量
+  sampling_steps: 50               # 大幅降低采样步数
+  fid_sampling_steps: 20           # 极大降低FID采样步数
   eta: 0.0                         # DDIM确定性采样
   
   # 保存路径
