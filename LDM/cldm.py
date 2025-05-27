@@ -138,26 +138,30 @@ class UNet(nn.Module):
     def __init__(self, 
                  latent_dim=256,
                  num_classes=31,
-                 time_emb_dim=128,
-                 class_emb_dim=64,
-                 base_channels=128,
+                 time_emb_dim=256,
+                 class_emb_dim=128,
+                 base_channels=192,
                  groups=32):
         super().__init__()
         
         self.latent_dim = latent_dim
         self.time_emb_dim = time_emb_dim
         
-        # 时间嵌入
+        # 增强的时间嵌入
         self.time_embed = nn.Sequential(
+            nn.Linear(time_emb_dim, time_emb_dim),
+            nn.SiLU(),
             nn.Linear(time_emb_dim, time_emb_dim),
             nn.SiLU(),
             nn.Linear(time_emb_dim, time_emb_dim),
         )
         
-        # 类别嵌入
+        # 增强的类别嵌入
         self.class_embed = nn.Sequential(
             nn.Embedding(num_classes, class_emb_dim),
-            nn.Linear(class_emb_dim, time_emb_dim),
+            nn.Linear(class_emb_dim, class_emb_dim * 2),
+            nn.SiLU(),
+            nn.Linear(class_emb_dim * 2, time_emb_dim),
             nn.SiLU(),
             nn.Linear(time_emb_dim, time_emb_dim),
         )
@@ -296,13 +300,45 @@ class DDPM:
             noise = torch.randn_like(z_t)
             return posterior_mean + torch.sqrt(posterior_variance) * noise
     
-    def p_sample_loop(self, model, shape, class_labels, device):
-        """完整的反向采样过程"""
+    def ddim_sample_step(self, model, z_t, t, t_prev, class_labels, eta=0.0):
+        """DDIM采样单步"""
+        pred_noise = model(z_t, t, class_labels)
+        
+        alpha_cumprod_t = self.alphas_cumprod[t].view(-1, 1, 1, 1)
+        alpha_cumprod_t_prev = self.alphas_cumprod[t_prev].view(-1, 1, 1, 1) if t_prev >= 0 else torch.ones_like(alpha_cumprod_t)
+        
+        # 预测原始图像
+        pred_z_0 = (z_t - torch.sqrt(1 - alpha_cumprod_t) * pred_noise) / torch.sqrt(alpha_cumprod_t)
+        pred_z_0 = torch.clamp(pred_z_0, -1., 1.)
+        
+        # DDIM公式
+        sigma = eta * torch.sqrt((1 - alpha_cumprod_t_prev) / (1 - alpha_cumprod_t)) * torch.sqrt(1 - alpha_cumprod_t / alpha_cumprod_t_prev)
+        noise = torch.randn_like(z_t) if eta > 0 else torch.zeros_like(z_t)
+        
+        z_t_prev = (
+            torch.sqrt(alpha_cumprod_t_prev) * pred_z_0 +
+            torch.sqrt(1 - alpha_cumprod_t_prev - sigma**2) * pred_noise +
+            sigma * noise
+        )
+        
+        return z_t_prev
+
+    def p_sample_loop(self, model, shape, class_labels, device, sampling_steps=None, eta=0.0):
+        """完整的反向采样过程，支持DDIM加速"""
         z = torch.randn(shape, device=device)
         
-        for i in reversed(range(self.num_timesteps)):
-            t = torch.full((shape[0],), i, device=device, dtype=torch.long)
-            z = self.p_sample(model, z, t, class_labels)
+        if sampling_steps is None:
+            # 标准DDPM采样（1000步）
+            for i in reversed(range(self.num_timesteps)):
+                t = torch.full((shape[0],), i, device=device, dtype=torch.long)
+                z = self.p_sample(model, z, t, class_labels)
+        else:
+            # DDIM采样（更少步数，保持质量）
+            timesteps = torch.linspace(self.num_timesteps - 1, 0, sampling_steps, dtype=torch.long)
+            for i in range(len(timesteps)):
+                t = torch.full((shape[0],), timesteps[i], device=device, dtype=torch.long)
+                t_prev = timesteps[i+1] if i < len(timesteps) - 1 else -1
+                z = self.ddim_sample_step(model, z, t, t_prev, class_labels, eta)
             
         return z
 
@@ -374,13 +410,13 @@ class CLDM(nn.Module):
         
         return loss
     
-    def sample(self, class_labels, device):
+    def sample(self, class_labels, device, sampling_steps=None, eta=0.0):
         """生成新的潜向量"""
         batch_size = len(class_labels)
         shape = (batch_size, self.unet.latent_dim, 16, 16)
         
         with torch.no_grad():
-            return self.ddpm.p_sample_loop(self.unet, shape, class_labels, device)
+            return self.ddpm.p_sample_loop(self.unet, shape, class_labels, device, sampling_steps, eta)
     
     def to(self, device):
         """重写to方法，确保DDPM也移动到正确设备"""
