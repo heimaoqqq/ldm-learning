@@ -70,6 +70,12 @@ def denormalize(x):
     """反归一化 [-1,1] -> [0,1]"""
     return (x + 1) / 2
 
+def clear_gpu_memory():
+    """清理GPU内存"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
 
 
 def extract_latent_features(vqvae_model, dataloader, device, max_samples=None):
@@ -121,47 +127,49 @@ def calculate_fid_score(cldm_model, vqvae_model, val_loader, config, device):
         cldm_model.eval()
         vqvae_model.eval()
         
-        sample_size = min(1000, config['training']['num_sample_images'])  # 使用足够的样本确保准确性
+        sample_size = min(config['training']['num_sample_images'], 500)  # 限制最大样本数
         sampling_steps = config['training']['fid_sampling_steps']
         eta = config['training']['eta']
         
-        real_images = []
-        generated_images = []
         sample_count = 0
+        batch_size_fid = 1  # FID计算时使用小batch避免内存问题
         
         with torch.no_grad():
             for images, labels in tqdm(val_loader, desc="FID采样"):
                 if sample_count >= sample_size:
                     break
+                
+                # 逐个处理以节省内存
+                for i in range(min(batch_size_fid, images.size(0), sample_size - sample_count)):
+                    if sample_count >= sample_size:
+                        break
+                        
+                    img = images[i:i+1].to(device)
+                    lbl = labels[i:i+1].to(device)
                     
-                images = images.to(device)
-                labels = labels.to(device)
-                batch_size = images.size(0)
-                
-                # 生成对应图像
-                generated_z = cldm_model.sample(
-                    labels, device, sampling_steps=sampling_steps, eta=eta
-                )
-                gen_images = vqvae_model.decoder(generated_z)
-                
-                # 转换为[0,255] uint8格式
-                real_uint8 = ((denormalize(images) * 255).clamp(0, 255).to(torch.uint8))
-                gen_uint8 = ((denormalize(gen_images) * 255).clamp(0, 255).to(torch.uint8))
-                
-                real_images.append(real_uint8.cpu())
-                generated_images.append(gen_uint8.cpu())
-                
-                sample_count += batch_size
-                
-            # 合并所有图像
-            real_all = torch.cat(real_images, dim=0)[:sample_size]
-            gen_all = torch.cat(generated_images, dim=0)[:sample_size]
+                    # 生成对应图像
+                    generated_z = cldm_model.sample(
+                        lbl, device, sampling_steps=sampling_steps, eta=eta
+                    )
+                    gen_img = vqvae_model.decoder(generated_z)
+                    
+                    # 转换为[0,255] uint8格式并立即更新FID
+                    real_uint8 = ((denormalize(img) * 255).clamp(0, 255).to(torch.uint8))
+                    gen_uint8 = ((denormalize(gen_img) * 255).clamp(0, 255).to(torch.uint8))
+                    
+                    # 立即更新FID计算，释放内存
+                    fid_metric.update(real_uint8, real=True)
+                    fid_metric.update(gen_uint8, real=False)
+                    
+                    sample_count += 1
+                    
+                    # 清理GPU内存
+                    del img, lbl, generated_z, gen_img, real_uint8, gen_uint8
+                    torch.cuda.empty_cache()
             
-            print(f"FID评估: 真实图像 {real_all.shape[0]}, 生成图像 {gen_all.shape[0]}")
+            print(f"FID评估: 处理了 {sample_count} 个样本")
             
-            # 计算FID - 使用标准的InceptionV3特征
-            fid_metric.update(real_all.to(device), real=True)
-            fid_metric.update(gen_all.to(device), real=False)
+            # 计算FID分数
             fid_score = fid_metric.compute().item()
         
         cldm_model.train()
@@ -435,8 +443,13 @@ def main():
             num_batches += 1
             
             pbar.set_postfix({'loss': f"{loss.item():.6f}"})
+            
+            # 定期清理内存
+            if num_batches % 10 == 0:
+                clear_gpu_memory()
         
         avg_train_loss = running_loss / num_batches
+        clear_gpu_memory()  # 每个epoch结束后清理内存
         
         # 学习率调度
         if scheduler:
