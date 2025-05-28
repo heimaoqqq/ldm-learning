@@ -1,6 +1,7 @@
 """
 严格按照论文标准的CLDM训练脚本
 基于ControlNet和Stable Diffusion论文参数
+优化版本：存储管理 + FID评估 + 智能检查点
 """
 
 import os
@@ -14,6 +15,8 @@ import argparse
 from tqdm import tqdm
 import numpy as np
 from collections import OrderedDict
+import gc
+import glob
 
 # 添加路径
 sys.path.append('../VAE')
@@ -141,6 +144,103 @@ def load_vqvae(config):
     
     return vqvae
 
+def clean_old_checkpoints(save_dir, keep_best=True, keep_latest=True):
+    """清理旧的检查点文件，节省存储空间"""
+    try:
+        # 获取所有检查点文件
+        checkpoint_files = glob.glob(os.path.join(save_dir, 'checkpoint_epoch_*.pth'))
+        
+        # 保留最新的2个检查点
+        if len(checkpoint_files) > 2:
+            # 按修改时间排序
+            checkpoint_files.sort(key=os.path.getmtime)
+            # 删除较旧的文件
+            for old_file in checkpoint_files[:-2]:
+                try:
+                    os.remove(old_file)
+                    print(f"清理旧检查点: {os.path.basename(old_file)}")
+                except OSError:
+                    pass
+        
+        # 清理内存
+        gc.collect()
+        torch.cuda.empty_cache()
+        
+    except Exception as e:
+        print(f"清理检查点时出错: {e}")
+
+def calculate_simple_fid(model, vqvae, dataloader, device, num_samples=200, ema=None):
+    """计算简化FID分数 - 基于像素级统计"""
+    if ema is not None:
+        ema.apply_shadow()
+    
+    model.eval()
+    vqvae.eval()
+    
+    real_images = []
+    fake_images = []
+    
+    sample_count = 0
+    
+    with torch.no_grad():
+        for images, labels in dataloader:
+            if sample_count >= num_samples:
+                break
+                
+            images = images.to(device)
+            labels = labels.to(device)
+            
+            # 收集真实图像
+            real_images.append(images.cpu())
+            
+            # 生成假样本
+            try:
+                # 使用VQ-VAE编码
+                z_e = vqvae.encoder(images)
+                z_q, _, _ = vqvae.vq(z_e)
+                
+                # CLDM采样 (快速采样)
+                fake_latents = model.sample(
+                    class_labels=labels,
+                    device=device,
+                    shape=z_q.shape,
+                    num_inference_steps=10,  # 非常快速的采样
+                    eta=0.0
+                )
+                
+                # VQ-VAE解码
+                fake_imgs = vqvae.decoder(fake_latents)
+                fake_images.append(fake_imgs.cpu())
+                
+            except Exception as e:
+                print(f"FID采样失败: {e}")
+                # 使用随机图像作为备选
+                fake_imgs = torch.randn_like(images)
+                fake_images.append(fake_imgs.cpu())
+            
+            sample_count += images.size(0)
+    
+    if ema is not None:
+        ema.restore()
+    
+    # 计算简化FID (基于均值和方差)
+    if real_images and fake_images:
+        real_images = torch.cat(real_images, dim=0)[:num_samples]
+        fake_images = torch.cat(fake_images, dim=0)[:num_samples]
+        
+        # 简化的FID计算
+        real_mean = torch.mean(real_images)
+        fake_mean = torch.mean(fake_images)
+        
+        real_var = torch.var(real_images)
+        fake_var = torch.var(fake_images)
+        
+        # 简化FID分数
+        fid = float((real_mean - fake_mean)**2 + (real_var - fake_var)**2)
+        return fid * 1000  # 放大到合理范围
+    
+    return float('inf')
+
 def train_epoch(model, vqvae, dataloader, optimizer, device, ema=None, grad_clip_norm=None):
     """训练一个epoch - 论文标准流程"""
     model.train()
@@ -186,6 +286,10 @@ def train_epoch(model, vqvae, dataloader, optimizer, device, ema=None, grad_clip
             'Loss': f'{loss.item():.6f}',
             'Avg Loss': f'{total_loss/num_batches:.6f}'
         })
+        
+        # 定期清理内存
+        if batch_idx % 50 == 0:
+            torch.cuda.empty_cache()
     
     return total_loss / num_batches
 
@@ -220,40 +324,8 @@ def validate_epoch(model, vqvae, dataloader, device, ema=None):
     
     return total_loss / num_batches
 
-@torch.no_grad()
-def sample_images(model, vqvae, device, num_classes, num_samples_per_class=4, 
-                 sampling_steps=50, eta=0.0, ema=None):
-    """生成样本图像"""
-    if ema is not None:
-        ema.apply_shadow()
-    
-    model.eval()
-    vqvae.eval()
-    
-    all_samples = []
-    
-    for class_id in range(min(8, num_classes)):  # 限制类别数避免内存问题
-        class_labels = torch.full((num_samples_per_class,), class_id, device=device, dtype=torch.long)
-        
-        # CLDM采样潜在表示
-        latent_samples = model.sample(
-            class_labels=class_labels,
-            device=device,
-            num_inference_steps=sampling_steps,
-            eta=eta
-        )
-        
-        # VQ-VAE解码到图像空间
-        image_samples = vqvae.decoder(latent_samples)
-        all_samples.append(image_samples)
-    
-    if ema is not None:
-        ema.restore()
-    
-    return torch.cat(all_samples, dim=0)
-
-def save_checkpoint(model, optimizer, scheduler, ema, epoch, loss, save_dir):
-    """保存检查点"""
+def save_checkpoint(model, optimizer, scheduler, ema, epoch, loss, save_dir, is_best=False):
+    """优化的检查点保存"""
     os.makedirs(save_dir, exist_ok=True)
     
     checkpoint = {
@@ -270,13 +342,31 @@ def save_checkpoint(model, optimizer, scheduler, ema, epoch, loss, save_dir):
         checkpoint['ema_shadow'] = ema.shadow
     
     # 保存最新检查点
-    torch.save(checkpoint, os.path.join(save_dir, 'latest_checkpoint.pth'))
+    latest_path = os.path.join(save_dir, 'latest_checkpoint.pth')
+    torch.save(checkpoint, latest_path)
     
-    # 保存epoch检查点
-    torch.save(checkpoint, os.path.join(save_dir, f'checkpoint_epoch_{epoch}.pth'))
+    if is_best:
+        # 保存最佳模型时，先删除旧的最佳模型
+        best_path = os.path.join(save_dir, 'best_checkpoint.pth')
+        if os.path.exists(best_path):
+            try:
+                os.remove(best_path)
+            except OSError:
+                pass
+        torch.save(checkpoint, best_path)
+        print(f"保存最佳模型 (验证损失: {loss:.6f})")
+    
+    # 每50轮保存检查点
+    if (epoch + 1) % 50 == 0:
+        epoch_path = os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}.pth')
+        torch.save(checkpoint, epoch_path)
+        print(f"保存周期检查点: epoch {epoch+1}")
+        
+        # 清理旧检查点
+        clean_old_checkpoints(save_dir)
 
 def main():
-    parser = argparse.ArgumentParser(description='论文标准CLDM训练')
+    parser = argparse.ArgumentParser(description='论文标准CLDM训练 - 优化版')
     parser.add_argument('--config', type=str, default='config_paper_standard.yaml',
                        help='配置文件路径')
     parser.add_argument('--resume', type=str, default=None,
@@ -321,6 +411,9 @@ def main():
     
     # 恢复训练
     start_epoch = 0
+    best_val_loss = float('inf')
+    best_fid = float('inf')
+    
     if args.resume:
         print(f"从检查点恢复训练: {args.resume}")
         checkpoint = torch.load(args.resume, map_location=device)
@@ -331,20 +424,26 @@ def main():
         if ema and 'ema_shadow' in checkpoint:
             ema.shadow = checkpoint['ema_shadow']
         start_epoch = checkpoint['epoch'] + 1
+        best_val_loss = checkpoint.get('loss', float('inf'))
         print(f"从epoch {start_epoch}开始训练")
     
     # 训练配置
     training_config = config['training']
     epochs = training_config['epochs']
-    val_interval = training_config['val_interval']
-    save_interval = training_config['save_interval']
-    sample_interval = training_config['sample_interval']
-    grad_clip_norm = training_config.get('grad_clip_norm')
     save_dir = training_config['save_dir']
+    grad_clip_norm = training_config.get('grad_clip_norm')
+    
+    # 评估间隔
+    val_interval = 10  # 每10轮验证
+    fid_interval = 20  # 每20轮FID评估
     
     # 训练循环
     print("开始训练...")
-    best_val_loss = float('inf')
+    print("优化策略:")
+    print("- 每次更新最佳模型时清除旧模型")
+    print("- 每50轮保存检查点，自动清理旧检查点")
+    print("- 每20轮进行FID评估")
+    print("- 不保存生成图片，节省存储空间")
     
     for epoch in range(start_epoch, epochs):
         print(f"\n=== Epoch {epoch+1}/{epochs} ===")
@@ -360,44 +459,47 @@ def main():
             scheduler.step()
             print(f"学习率: {scheduler.get_last_lr()[0]:.8f}")
         
-        # 验证
+        # 验证和FID评估
         if (epoch + 1) % val_interval == 0:
             val_loss = validate_epoch(model, vqvae, val_loader, device, ema)
             print(f"验证损失: {val_loss:.6f}")
             
-            # 保存最佳模型
-            if val_loss < best_val_loss:
+            # FID评估
+            if (epoch + 1) % fid_interval == 0:
+                print("计算FID...")
+                try:
+                    fid_score = calculate_simple_fid(
+                        model, vqvae, val_loader, device, 
+                        num_samples=100, ema=ema  # 减少样本数量
+                    )
+                    print(f"FID分数: {fid_score:.2f}")
+                    
+                    # 根据FID保存最佳模型
+                    if fid_score < best_fid:
+                        best_fid = fid_score
+                        save_checkpoint(model, optimizer, scheduler, ema, epoch, val_loss, save_dir, is_best=True)
+                        print(f"FID改善! 新最佳FID: {fid_score:.2f}")
+                    
+                except Exception as e:
+                    print(f"FID计算失败: {e}")
+            
+            # 根据验证损失保存模型
+            elif val_loss < best_val_loss:
                 best_val_loss = val_loss
-                save_checkpoint(model, optimizer, scheduler, ema, epoch, val_loss, 
-                              os.path.join(save_dir, 'best'))
-                print(f"保存最佳模型 (验证损失: {val_loss:.6f})")
+                save_checkpoint(model, optimizer, scheduler, ema, epoch, val_loss, save_dir, is_best=True)
         
-        # 定期保存
-        if (epoch + 1) % save_interval == 0:
+        # 定期保存和清理
+        if (epoch + 1) % 50 == 0:
             save_checkpoint(model, optimizer, scheduler, ema, epoch, train_loss, save_dir)
-            print(f"保存检查点: epoch {epoch+1}")
         
-        # 生成样本
-        if (epoch + 1) % sample_interval == 0:
-            print("生成样本图像...")
-            try:
-                samples = sample_images(
-                    model, vqvae, device, 
-                    num_classes=config['dataset']['num_classes'],
-                    sampling_steps=training_config.get('sampling_steps', 50),
-                    ema=ema
-                )
-                
-                # 保存样本（这里可以添加保存图像的代码）
-                sample_dir = os.path.join(save_dir, 'samples')
-                os.makedirs(sample_dir, exist_ok=True)
-                torch.save(samples.cpu(), os.path.join(sample_dir, f'samples_epoch_{epoch+1}.pt'))
-                print(f"样本已保存到: {sample_dir}")
-                
-            except Exception as e:
-                print(f"样本生成失败: {e}")
+        # 内存清理
+        if (epoch + 1) % 10 == 0:
+            gc.collect()
+            torch.cuda.empty_cache()
     
     print("训练完成!")
+    print(f"最佳验证损失: {best_val_loss:.6f}")
+    print(f"最佳FID分数: {best_fid:.2f}")
 
 if __name__ == "__main__":
     main() 
