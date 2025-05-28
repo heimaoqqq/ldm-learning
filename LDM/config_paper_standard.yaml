@@ -71,7 +71,7 @@ training:
   
   # FID评估配置 - 高质量采样
   fid_eval_freq: 20
-  num_sample_images: 500          # 更多样本获得准确FID
+  num_sample_images: 1000          # 更多样本获得准确FID
   sampling_steps: 200               # DDIM采样步数
   fid_sampling_steps: 200          # FID评估使用更多步数
   eta: 0.0                         # DDIM确定性采样
