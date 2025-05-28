@@ -1,0 +1,88 @@
+# CLDM 优化配置文件
+# 基于修复版本模型，专门优化FID分数
+
+# 数据集配置
+dataset:
+  root_dir: "/kaggle/input/dataset"
+  batch_size: 2                    # 减少内存使用
+  num_workers: 2
+  num_classes: 31
+
+# VQ-VAE配置（预训练模型）
+vqvae:
+  model_path: "/kaggle/input/adv-vqvae-best-fid-pth/adv_vqvae_best_fid.pth"
+  in_channels: 3
+  latent_dim: 256
+  num_embeddings: 512
+  beta: 0.25
+  decay: 0.99
+  groups: 32
+
+# 优化CLDM模型配置
+cldm:
+  model_type: "ImprovedCLDM"       # 使用优化版本
+  latent_dim: 256
+  num_classes: 31
+  
+  # DDPM配置
+  num_timesteps: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  noise_schedule: "cosine"         # cosine调度效果更好
+  
+  # U-Net架构配置 - 激进内存优化
+  time_emb_dim: 128                # 大幅降低时间嵌入维度
+  class_emb_dim: 64                # 大幅降低类别嵌入维度
+  base_channels: 64                # 大幅降低基础通道数
+  dropout: 0.1                     # 防止过拟合
+  groups: 32
+
+# 训练配置 - 优化FID分数
+training:
+  epochs: 300
+  lr: 0.0001
+  weight_decay: 0.01
+  
+  # 学习率调度
+  use_scheduler: true
+  scheduler_type: "cosine"
+  warmup_epochs: 20
+  min_lr: 0.00001
+  
+  # 梯度相关
+  grad_clip_norm: 1.0
+  
+  # 验证和保存
+  val_interval: 5
+  save_interval: 20
+  sample_interval: 10
+  
+  # FID评估配置 - 激进优化
+  fid_eval_freq: 15                # 大幅降低FID评估频率
+  num_sample_images: 200           # 大幅减少采样数量
+  sampling_steps: 50               # 大幅降低采样步数
+  fid_sampling_steps: 20           # 极大降低FID采样步数
+  eta: 0.0                         # DDIM确定性采样
+  
+  # 保存路径
+  save_dir: "/kaggle/working/cldm_optimized"
+
+# 系统配置
+system:
+  device: "cuda"
+  mixed_precision: true            # 启用混合精度
+  seed: 42
+  
+# 优化建议
+optimization:
+  # 内存优化
+  max_memory_gb: 14               # 为16GB GPU预留内存
+  enable_checkpointing: false     # 优化模型不需要
+  
+  # 采样优化
+  use_ddim: true                  # 使用DDIM采样
+  ddim_eta: 0.0                   # 确定性采样
+  
+  # 评估优化
+  early_stopping_patience: 50     # 早停耐心
+  best_metric: "fid"              # 以FID为主要指标 

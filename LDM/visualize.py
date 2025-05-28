@@ -22,7 +22,7 @@ def denormalize(x):
     """反归一化，将[-1,1]转换为[0,1]"""
     return (x * 0.5 + 0.5).clamp(0, 1)
 
-def generate_class_samples(model, vqvae_model, num_classes, samples_per_class=4, device='cuda'):
+def generate_class_samples(model, vqvae_model, num_classes, samples_per_class=4, device='cuda', sampling_steps=100):
     """为每个类别生成样本"""
     model.eval()
     
@@ -34,8 +34,8 @@ def generate_class_samples(model, vqvae_model, num_classes, samples_per_class=4,
             # 为当前类别生成多个样本
             labels = torch.full((samples_per_class,), class_id, device=device)
             
-            # 生成潜在向量
-            generated_z = model.sample(labels, device)
+            # 生成潜在向量（使用DDIM加速）
+            generated_z = model.sample(labels, device, sampling_steps=sampling_steps)
             
             # 通过VQ-VAE解码器生成图像
             generated_images = vqvae_model.decoder(generated_z)
@@ -68,7 +68,7 @@ def create_class_comparison_grid(generated_images, class_labels, num_classes, sa
     plt.tight_layout()
     return fig
 
-def compare_real_vs_generated(vqvae_model, cldm_model, val_loader, num_samples=8, device='cuda'):
+def compare_real_vs_generated(vqvae_model, cldm_model, val_loader, num_samples=8, device='cuda', sampling_steps=100):
     """比较真实图像与生成图像"""
     cldm_model.eval()
     
@@ -78,8 +78,8 @@ def compare_real_vs_generated(vqvae_model, cldm_model, val_loader, num_samples=8
     real_labels = real_labels[:num_samples].to(device)
     
     with torch.no_grad():
-        # 生成对应类别的图像
-        generated_z = cldm_model.sample(real_labels, device)
+        # 生成对应类别的图像（使用DDIM）
+        generated_z = cldm_model.sample(real_labels, device, sampling_steps=sampling_steps)
         generated_images = vqvae_model.decoder(generated_z)
         
         # 反归一化
@@ -105,17 +105,17 @@ def compare_real_vs_generated(vqvae_model, cldm_model, val_loader, num_samples=8
         plt.tight_layout()
         return fig, real_images_norm, generated_images_norm
 
-def test_interpolation(cldm_model, vqvae_model, class1, class2, num_steps=8, device='cuda'):
+def test_interpolation(cldm_model, vqvae_model, class1, class2, num_steps=8, device='cuda', sampling_steps=100):
     """测试类别间的插值"""
     cldm_model.eval()
     
     with torch.no_grad():
-        # 生成两个类别的潜在向量
+        # 生成两个类别的潜在向量（使用DDIM）
         labels1 = torch.full((1,), class1, device=device)
         labels2 = torch.full((1,), class2, device=device)
         
-        z1 = cldm_model.sample(labels1, device)
-        z2 = cldm_model.sample(labels2, device)
+        z1 = cldm_model.sample(labels1, device, sampling_steps=sampling_steps)
+        z2 = cldm_model.sample(labels2, device, sampling_steps=sampling_steps)
         
         # 在潜在空间中插值
         interpolated_images = []
@@ -233,13 +233,17 @@ def main():
     # 主要可视化流程
     print("开始生成可视化结果...")
     
+    # 获取采样步数配置
+    sampling_steps = config['training'].get('sampling_steps', 100)
+    print(f"使用DDIM {sampling_steps}步采样")
+    
     # 1. 为每个类别生成样本（限制为前8个类别）
     max_classes_to_show = min(8, config['cldm']['num_classes'])
     samples_per_class = 4
     
     print(f"为前{max_classes_to_show}个类别生成样本...")
     generated_images, class_labels = generate_class_samples(
-        cldm, vqvae, max_classes_to_show, samples_per_class, device
+        cldm, vqvae, max_classes_to_show, samples_per_class, device, sampling_steps
     )
     
     # 保存类别样本网格
@@ -265,7 +269,7 @@ def main():
     
     # 2. 真实图像与生成图像对比
     print("创建真实vs生成图像对比...")
-    comparison_fig, real_imgs, gen_imgs = compare_real_vs_generated(vqvae, cldm, val_loader, 8, device)
+    comparison_fig, real_imgs, gen_imgs = compare_real_vs_generated(vqvae, cldm, val_loader, 8, device, sampling_steps)
     comparison_path = os.path.join(vis_dir, "real_vs_generated.png")
     comparison_fig.savefig(comparison_path, dpi=200, bbox_inches='tight')
     plt.close(comparison_fig)
@@ -275,7 +279,7 @@ def main():
     if max_classes_to_show >= 2:
         print("创建类别间插值...")
         class1, class2 = 0, min(1, max_classes_to_show - 1)
-        interp_fig, interp_imgs = test_interpolation(cldm, vqvae, class1, class2, 8, device)
+        interp_fig, interp_imgs = test_interpolation(cldm, vqvae, class1, class2, 8, device, sampling_steps)
         interp_path = os.path.join(vis_dir, f"interpolation_ID{class1+1}_to_ID{class2+1}.png")
         interp_fig.savefig(interp_path, dpi=200, bbox_inches='tight')
         plt.close(interp_fig)
@@ -287,7 +291,7 @@ def main():
     random_labels = torch.randint(0, max_classes_to_show, (num_random_samples,), device=device)
     
     with torch.no_grad():
-        random_z = cldm.sample(random_labels, device)
+        random_z = cldm.sample(random_labels, device, sampling_steps=sampling_steps)
         random_images = vqvae.decoder(random_z)
         random_images = denormalize(random_images)
     

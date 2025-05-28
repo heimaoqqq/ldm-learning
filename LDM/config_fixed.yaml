@@ -1,0 +1,91 @@
+# CLDM 修复版配置文件
+# 专门解决FID分数问题
+
+# 数据集配置
+dataset:
+  root_dir: "/kaggle/input/dataset"
+  batch_size: 2                    # 小batch size避免内存问题
+  num_workers: 2
+  num_classes: 31
+
+# VQ-VAE配置（预训练模型）
+vqvae:
+  model_path: "/kaggle/input/adv-vqvae-best-fid-pth/adv_vqvae_best_fid.pth"
+  in_channels: 3
+  latent_dim: 256
+  num_embeddings: 512
+  beta: 0.25
+  decay: 0.99
+  groups: 32
+
+# 修复版CLDM模型配置
+cldm:
+  model_type: "FixedCLDM"
+  latent_dim: 256
+  num_classes: 31
+  
+  # DDPM配置 - 使用linear调度
+  num_timesteps: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  noise_schedule: "linear"         # 改回linear调度
+  
+  # U-Net架构配置 - 增加模型容量
+  time_emb_dim: 256                # 增加时间嵌入维度
+  class_emb_dim: 128               # 增加类别嵌入维度
+  base_channels: 128               # 增加基础通道数
+  dropout: 0.1
+  groups: 32
+  
+  # EMA配置
+  use_ema: true
+  ema_decay: 0.9999
+
+# 训练配置 - 更保守的设置
+training:
+  epochs: 200                      # 增加训练轮数
+  lr: 0.00005                      # 降低学习率
+  weight_decay: 0.01
+  
+  # 学习率调度
+  use_scheduler: true
+  scheduler_type: "cosine"
+  warmup_epochs: 10
+  min_lr: 0.000005
+  
+  # 梯度相关
+  grad_clip_norm: 1.0
+  
+  # 验证和保存
+  val_interval: 5
+  save_interval: 20
+  sample_interval: 10
+  
+  # FID评估配置 - 使用更多采样步数
+  fid_eval_freq: 10
+  num_sample_images: 500           # 增加采样数量以获得更准确的FID
+  sampling_steps: 100              # 增加采样步数
+  fid_sampling_steps: 100          # FID计算时也使用更多步数
+  eta: 0.0                         # DDIM确定性采样
+  
+  # 保存路径
+  save_dir: "/kaggle/working/cldm_fixed"
+
+# 系统配置
+system:
+  device: "cuda"
+  mixed_precision: true
+  seed: 42
+  
+# 修复建议的具体配置
+fixes:
+  # 提升生成质量的配置
+  high_quality_sampling: true      # 高质量采样
+  classifier_free_guidance: false  # 暂时不用CFG
+  improved_architecture: true      # 改进架构
+  better_noise_schedule: true      # 更好的噪声调度
+  
+  # 调试选项
+  save_intermediate_results: true  # 保存中间结果便于调试
+  detailed_logging: false          # 减少日志输出
+  memory_efficient: true           # 内存优化 
