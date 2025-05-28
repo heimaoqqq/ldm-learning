@@ -38,17 +38,30 @@ class EMA:
     def update(self):
         for name, param in self.model.named_parameters():
             if param.requires_grad:
-                self.shadow[name] = self.decay * self.shadow[name] + (1 - self.decay) * param.data
+                # 确保shadow权重在与参数相同的设备上
+                if name not in self.shadow:
+                    self.shadow[name] = param.data.clone()
+                else:
+                    # 如果设备不匹配，移动shadow到参数的设备
+                    if self.shadow[name].device != param.device:
+                        self.shadow[name] = self.shadow[name].to(param.device)
+                    self.shadow[name] = self.decay * self.shadow[name] + (1 - self.decay) * param.data
     
     def apply_shadow(self):
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 self.backup[name] = param.data.clone()
+                # 确保shadow权重在正确的设备上
+                if self.shadow[name].device != param.device:
+                    self.shadow[name] = self.shadow[name].to(param.device)
                 param.data.copy_(self.shadow[name])
     
     def restore(self):
         for name, param in self.model.named_parameters():
             if param.requires_grad:
+                # 确保backup权重在正确的设备上
+                if self.backup[name].device != param.device:
+                    self.backup[name] = self.backup[name].to(param.device)
                 param.data.copy_(self.backup[name])
 
 def load_config(config_path):
