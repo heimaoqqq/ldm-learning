@@ -166,6 +166,10 @@ def analyze_reconstruction_quality(original, reconstructed):
     """分析重建质量"""
     print("\n=== 重建质量分析 ===")
     
+    # 确保tensors在同一设备上
+    if original.device != reconstructed.device:
+        reconstructed = reconstructed.to(original.device)
+    
     # 逐样本分析
     batch_size = original.shape[0]
     mse_list = []
@@ -204,9 +208,13 @@ def analyze_reconstruction_quality(original, reconstructed):
         print("❌ 重建质量差")
     
     # 保存对比图像
+    # 移动到CPU进行图像保存
+    original_cpu = original[:4].cpu()
+    reconstructed_cpu = reconstructed[:4].cpu()
+    
     comparison = torch.cat([
-        (original[:4] + 1) / 2,  # 原图
-        (reconstructed[:4] + 1) / 2  # 重建图
+        (original_cpu + 1) / 2,  # 原图
+        (reconstructed_cpu + 1) / 2  # 重建图
     ], dim=0)
     
     grid = vutils.make_grid(comparison, nrow=4, normalize=False, padding=2)
