@@ -9,7 +9,7 @@ model:
   in_channels: 3
   latent_dim: 256
   num_embeddings: 8192
-  beta: 0.15
+  beta: 0.5
   vq_ema_decay: 0.99     # 码本 EMA 更新衰减率
   groups: 32
 
