@@ -387,9 +387,10 @@ class PaperStandardUNet(nn.Module):
         
         return self.out(h)
 
-class PaperStandardDDPM:
+class PaperStandardDDPM(nn.Module):
     """严格按照论文的DDPM扩散过程"""
     def __init__(self, num_timesteps=1000, beta_schedule="linear"):
+        super().__init__()
         self.num_timesteps = num_timesteps
         
         # Beta调度
@@ -416,9 +417,6 @@ class PaperStandardDDPM:
         self.register_buffer('posterior_variance', 
                            betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod))
     
-    def register_buffer(self, name, tensor):
-        setattr(self, name, tensor)
-    
     def q_sample(self, x_start, t, noise=None):
         """前向扩散过程"""
         if noise is None:
@@ -433,7 +431,7 @@ class PaperStandardDDPM:
                    num_inference_steps=50, eta=0.0):
         """DDIM采样 - 论文中使用"""
         # 创建时间步
-        timesteps = torch.linspace(self.num_timesteps-1, 0, num_inference_steps, dtype=torch.long)
+        timesteps = torch.linspace(self.num_timesteps-1, 0, num_inference_steps, dtype=torch.long, device=device)
         
         # 初始噪声
         x = torch.randn(shape, device=device)
@@ -445,8 +443,8 @@ class PaperStandardDDPM:
             pred_noise = model(x, t_batch, class_labels)
             
             # DDIM更新
-            alpha_t = self.alphas_cumprod[t]
-            alpha_prev = self.alphas_cumprod[timesteps[i+1]] if i < len(timesteps)-1 else torch.tensor(1.0)
+            alpha_t = self.alphas_cumprod[t.cpu()].to(device)
+            alpha_prev = self.alphas_cumprod[timesteps[i+1].cpu()].to(device) if i < len(timesteps)-1 else torch.tensor(1.0, device=device)
             
             beta_t = 1 - alpha_t
             sigma_t = eta * torch.sqrt((1 - alpha_prev) / (1 - alpha_t) * beta_t)
@@ -487,10 +485,7 @@ class PaperStandardCLDM(nn.Module):
             **unet_kwargs
         )
         
-        # 将diffusion的buffer注册到模型
-        for name, param in self.diffusion.__dict__.items():
-            if isinstance(param, torch.Tensor):
-                self.register_buffer(name, param)
+        # diffusion现在是nn.Module，它的buffer会自动管理
     
     def forward(self, x_0, class_labels):
         """训练时的前向传播"""
