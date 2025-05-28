@@ -17,6 +17,9 @@ import numpy as np
 from collections import OrderedDict
 import gc
 import glob
+import torchvision.utils as vutils
+import shutil
+from datetime import datetime
 
 # 添加路径
 sys.path.append('../VAE')
@@ -25,6 +28,18 @@ from dataset import build_dataloader
 
 # 导入论文标准模型
 from cldm_paper_standard import PaperStandardCLDM
+
+# 正确的FID计算库
+try:
+    from torch_fidelity import calculate_metrics
+    HAS_FIDELITY = True
+    print("✅ 成功导入torch-fidelity库")
+    # 设置环境变量避免OpenMP冲突
+    os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+except ImportError:
+    HAS_FIDELITY = False
+    print("❌ 警告: 未找到torch-fidelity库，FID计算将被跳过")
+    print("请运行: pip install torch-fidelity")
 
 class EMA:
     """指数移动平均 - 论文推荐"""
@@ -169,77 +184,150 @@ def clean_old_checkpoints(save_dir, keep_best=True, keep_latest=True):
     except Exception as e:
         print(f"清理检查点时出错: {e}")
 
-def calculate_simple_fid(model, vqvae, dataloader, device, num_samples=200, ema=None):
-    """计算简化FID分数 - 基于像素级统计"""
-    if ema is not None:
-        ema.apply_shadow()
+def calculate_proper_fid(model, vqvae, dataloader, device, num_samples=1000, ema=None):
+    """计算正确的FID分数 - 使用Inception网络特征"""
+    if not HAS_FIDELITY:
+        print("跳过FID计算：torch-fidelity库未安装")
+        return float('inf')
     
-    model.eval()
-    vqvae.eval()
+    # 创建临时目录
+    temp_dir = "temp_fid_eval"
+    real_dir = os.path.join(temp_dir, "real")
+    fake_dir = os.path.join(temp_dir, "fake")
     
-    real_images = []
-    fake_images = []
+    # 清理可能存在的旧目录
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
     
-    sample_count = 0
+    os.makedirs(real_dir, exist_ok=True)
+    os.makedirs(fake_dir, exist_ok=True)
     
-    with torch.no_grad():
-        for images, labels in dataloader:
-            if sample_count >= num_samples:
-                break
+    try:
+        if ema is not None:
+            ema.apply_shadow()
+        
+        model.eval()
+        vqvae.eval()
+        
+        print(f"生成{num_samples}个样本用于FID计算...")
+        
+        with torch.no_grad():
+            # 第一步：收集真实图像
+            real_count = 0
+            for images, labels in tqdm(dataloader, desc="保存真实图像"):
+                if real_count >= num_samples:
+                    break
+                    
+                images = images.to(device)
+                batch_size = images.shape[0]
                 
-            images = images.to(device)
-            labels = labels.to(device)
+                # 保存真实图像
+                for i in range(batch_size):
+                    if real_count >= num_samples:
+                        break
+                    
+                    # 反归一化到[0,1] - 假设输入是[-1,1]
+                    real_img = (images[i] + 1.0) / 2.0
+                    real_img = torch.clamp(real_img, 0, 1)
+                    
+                    vutils.save_image(
+                        real_img,
+                        os.path.join(real_dir, f"real_{real_count}.png")
+                    )
+                    real_count += 1
             
-            # 收集真实图像
-            real_images.append(images.cpu())
+            print(f"已保存{real_count}张真实图像")
             
-            # 生成假样本
-            try:
-                # 使用VQ-VAE编码
+            # 第二步：生成假图像
+            fake_count = 0
+            for images, labels in tqdm(dataloader, desc="生成假图像"):
+                if fake_count >= num_samples:
+                    break
+                    
+                images = images.to(device)
+                labels = labels.to(device)
+                batch_size = images.shape[0]
+                
+                # VQ-VAE编码真实图像获得形状
                 z_e = vqvae.encoder(images)
                 z_q, _, _ = vqvae.vq(z_e)
                 
-                # CLDM采样 (快速采样)
+                # 确定本批次要生成的数量
+                current_batch_samples = min(batch_size, num_samples - fake_count)
+                
+                # DDIM采样生成假图像
                 fake_latents = model.sample(
-                    class_labels=labels,
+                    class_labels=labels[:current_batch_samples],
                     device=device,
-                    shape=z_q.shape,
-                    num_inference_steps=10,  # 非常快速的采样
-                    eta=0.0
+                    shape=z_q[:current_batch_samples].shape,
+                    num_inference_steps=50,  # 使用足够的采样步数
+                    eta=0.0  # DDIM确定性采样
                 )
                 
                 # VQ-VAE解码
                 fake_imgs = vqvae.decoder(fake_latents)
-                fake_images.append(fake_imgs.cpu())
                 
-            except Exception as e:
-                print(f"FID采样失败: {e}")
-                # 使用随机图像作为备选
-                fake_imgs = torch.randn_like(images)
-                fake_images.append(fake_imgs.cpu())
+                # 保存生成图像
+                for i in range(current_batch_samples):
+                    # 反归一化到[0,1]
+                    fake_img = (fake_imgs[i] + 1.0) / 2.0
+                    fake_img = torch.clamp(fake_img, 0, 1)
+                    
+                    vutils.save_image(
+                        fake_img,
+                        os.path.join(fake_dir, f"fake_{fake_count}.png")
+                    )
+                    fake_count += 1
             
-            sample_count += images.size(0)
-    
-    if ema is not None:
-        ema.restore()
-    
-    # 计算简化FID (基于均值和方差)
-    if real_images and fake_images:
-        real_images = torch.cat(real_images, dim=0)[:num_samples]
-        fake_images = torch.cat(fake_images, dim=0)[:num_samples]
+            print(f"已生成{fake_count}张假图像")
         
-        # 简化的FID计算
-        real_mean = torch.mean(real_images)
-        fake_mean = torch.mean(fake_images)
+        if ema is not None:
+            ema.restore()
         
-        real_var = torch.var(real_images)
-        fake_var = torch.var(fake_images)
+        # 验证样本数量
+        if real_count < 50 or fake_count < 50:
+            print(f"警告：样本数量太少 (真实:{real_count}, 假:{fake_count})，FID可能不准确")
+            return float('inf')
         
-        # 简化FID分数
-        fid = float((real_mean - fake_mean)**2 + (real_var - fake_var)**2)
-        return fid * 1000  # 放大到合理范围
-    
-    return float('inf')
+        # 计算FID
+        print("计算FID分数...")
+        try:
+            metrics = calculate_metrics(
+                input1=real_dir,
+                input2=fake_dir,
+                cuda=torch.cuda.is_available(),
+                fid=True,
+                verbose=False
+            )
+            
+            fid_score = metrics['frechet_inception_distance']
+            print(f"FID计算完成: {fid_score:.4f}")
+            
+        except Exception as e:
+            print(f"torch-fidelity计算失败: {e}")
+            fid_score = float('inf')
+        
+        # 清理临时文件
+        try:
+            shutil.rmtree(temp_dir)
+        except:
+            pass
+        
+        return fid_score
+        
+    except Exception as e:
+        print(f"FID计算失败: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # 清理临时文件
+        try:
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+        except:
+            pass
+        
+        return float('inf')
 
 def train_epoch(model, vqvae, dataloader, optimizer, device, ema=None, grad_clip_norm=None):
     """训练一个epoch - 论文标准流程"""
@@ -468,9 +556,9 @@ def main():
             if (epoch + 1) % fid_interval == 0:
                 print("计算FID...")
                 try:
-                    fid_score = calculate_simple_fid(
+                    fid_score = calculate_proper_fid(
                         model, vqvae, val_loader, device, 
-                        num_samples=100, ema=ema  # 减少样本数量
+                        num_samples=1000, ema=ema  # 增加样本数量
                     )
                     print(f"FID分数: {fid_score:.2f}")
                     
