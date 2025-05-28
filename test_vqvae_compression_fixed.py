@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-测试VQ-VAE模型的压缩和重建能力
-验证上游模型是否正确工作
+修复版VQ-VAE测试脚本
+正确测试VQ-VAE重建质量，不会提前退出
 """
 
 import os
@@ -11,7 +11,6 @@ import torch.nn.functional as F
 import torchvision.utils as vutils
 import numpy as np
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 
 # 添加路径
 sys.path.append('VAE')
@@ -95,14 +94,16 @@ def test_vqvae_reconstruction():
     print(f"VQ-VAE参数量: {total_params:,}")
     
     # 测试重建质量
-    print("\n测试重建质量...")
+    print("\n开始完整的重建质量测试...")
     all_mse = []
     all_psnr = []
-    test_samples = 100
+    test_samples = 200  # 增加测试样本数
+    
+    print_shapes = True  # 控制是否打印形状信息
     
     with torch.no_grad():
         sample_count = 0
-        for images, labels in tqdm(val_loader, desc="测试重建"):
+        for batch_idx, (images, labels) in enumerate(tqdm(val_loader, desc="测试重建")):
             if sample_count >= test_samples:
                 break
                 
@@ -113,15 +114,19 @@ def test_vqvae_reconstruction():
             try:
                 # 编码
                 z_e = vqvae.encoder(images)
-                print(f"编码器输出形状: {z_e.shape}")
+                if print_shapes:
+                    print(f"编码器输出形状: {z_e.shape}")
                 
                 # 量化
                 z_q, commitment_loss, codebook_loss = vqvae.vq(z_e)
-                print(f"量化输出形状: {z_q.shape}")
+                if print_shapes:
+                    print(f"量化输出形状: {z_q.shape}")
                 
                 # 解码
                 reconstructed = vqvae.decoder(z_q)
-                print(f"重建输出形状: {reconstructed.shape}")
+                if print_shapes:
+                    print(f"重建输出形状: {reconstructed.shape}")
+                    print_shapes = False  # 只在第一个batch打印形状
                 
                 # 计算重建质量
                 for i in range(batch_size):
@@ -139,19 +144,18 @@ def test_vqvae_reconstruction():
                     sample_count += 1
                 
                 # 保存前几个样本的对比
-                if sample_count <= 8:
-                    # 保存原始图像和重建图像的对比
-                    orig_denorm = denormalize(images[:4])
-                    recon_denorm = denormalize(reconstructed[:4])
+                if batch_idx < 3:  # 保存前3个batch的对比图
+                    orig_denorm = denormalize(images)
+                    recon_denorm = denormalize(reconstructed)
                     
                     # 创建对比图像
                     comparison = torch.cat([orig_denorm, recon_denorm], dim=0)
-                    grid = vutils.make_grid(comparison, nrow=4, normalize=False, padding=2)
+                    grid = vutils.make_grid(comparison, nrow=batch_size, normalize=False, padding=2)
                     
                     os.makedirs('vqvae_test_results', exist_ok=True)
-                    vutils.save_image(grid, f'vqvae_test_results/reconstruction_batch_{len(all_mse)//4}.png')
+                    vutils.save_image(grid, f'vqvae_test_results/reconstruction_batch_{batch_idx}.png')
                 
-                break  # 只处理第一个batch来打印形状信息
+                # 不再提前退出，继续测试更多样本
                 
             except Exception as e:
                 print(f"前向传播出错: {e}")
@@ -184,7 +188,7 @@ def test_vqvae_reconstruction():
     # 测试潜在空间形状
     print(f"\n潜在空间测试:")
     with torch.no_grad():
-        test_input = torch.randn(1, 3, 128, 128).to(device)
+        test_input = torch.randn(1, 3, 256, 256).to(device)
         z_e = vqvae.encoder(test_input)
         z_q, _, _ = vqvae.vq(z_e)
         output = vqvae.decoder(z_q)
@@ -210,6 +214,7 @@ def test_vqvae_reconstruction():
     success = quality_good and shape_correct
     if success:
         print("✓ VQ-VAE模型工作正常，可以用于CLDM训练")
+        print(f"建议：直接使用config_fixed.yaml训练CLDM")
     else:
         print("✗ VQ-VAE模型存在问题，需要检查")
     
