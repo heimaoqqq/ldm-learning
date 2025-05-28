@@ -8,8 +8,8 @@ dataset:
 model:
   in_channels: 3
   latent_dim: 256
-  num_embeddings: 8192
-  beta: 0.5
+  num_embeddings: 1024           # 从8192大幅降低到1024
+  beta: 0.25             # 保持beta为0.25作为新码本大小的基准
   vq_ema_decay: 0.99     # 码本 EMA 更新衰减率
   groups: 32
 
@@ -19,7 +19,7 @@ training:
   weight_decay: 0.00001
   save_dir: "ae_debug_models"
   rec_weight: 1.0          # 恢复原始重建损失权重
-  vq_commit_weight: 0.25    # 降低VQ损失权重（从1.0到0.25）
+  # vq_commit_weight: 0.25 # 暂时注释掉，因为beta由model.beta控制
   perceptual_weight: 0.1   
   gen_adv_weight: 0.1      
   disc_train_interval: 5   # 每隔多少个batch训练一次判别器
