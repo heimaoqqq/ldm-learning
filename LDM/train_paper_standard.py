@@ -81,10 +81,10 @@ def setup_model_and_optimizer(config):
     # 论文标准Adam优化器
     optimizer = optim.Adam(
         model.parameters(),
-        lr=training_config['lr'],
-        betas=(training_config.get('beta1', 0.9), training_config.get('beta2', 0.999)),
-        eps=training_config.get('eps', 1e-8),
-        weight_decay=training_config.get('weight_decay', 0.0)
+        lr=float(training_config['lr']),
+        betas=(float(training_config.get('beta1', 0.9)), float(training_config.get('beta2', 0.999))),
+        eps=float(training_config.get('eps', 1e-8)),
+        weight_decay=float(training_config.get('weight_decay', 0.0))
     )
     
     # 论文推荐的余弦衰减调度器
@@ -92,8 +92,8 @@ def setup_model_and_optimizer(config):
         if training_config['scheduler_type'] == 'cosine':
             scheduler = optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
-                T_max=training_config['epochs'],
-                eta_min=training_config.get('min_lr', 1e-6)
+                T_max=int(training_config['epochs']),
+                eta_min=float(training_config.get('min_lr', 1e-6))
             )
         else:
             scheduler = None
@@ -103,7 +103,7 @@ def setup_model_and_optimizer(config):
     # EMA - 论文推荐
     ema = None
     if cldm_config.get('use_ema', False):
-        ema = EMA(model, decay=cldm_config.get('ema_decay', 0.9999))
+        ema = EMA(model, decay=float(cldm_config.get('ema_decay', 0.9999)))
     
     return model, optimizer, scheduler, ema
 
