@@ -376,34 +376,67 @@ def main():
     # 创建训练器
     trainer = LDMTrainer(config_path)
     
-    # 这里需要根据你的数据集创建数据加载器
-    # 示例代码（需要根据实际情况调整）
-    """
-    from your_dataset import YourDataset
+    # 配置数据集路径 - 根据Kaggle环境调整
+    print("🔍 配置数据集...")
     
-    train_dataset = YourDataset(...)
-    val_dataset = YourDataset(...)
+    # 添加VAE目录到路径以导入数据集模块
+    sys.path.append('../VAE')
+    from dataset import build_dataloader
     
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=trainer.config['dataset']['batch_size'],
-        shuffle=True,
-        num_workers=trainer.config['dataset']['num_workers']
-    )
+    try:
+        # 尝试加载数据集
+        train_loader, val_loader, train_dataset_len, val_dataset_len = build_dataloader(
+            root_dir=trainer.config['dataset']['root_dir'],
+            batch_size=trainer.config['dataset']['batch_size'],
+            num_workers=trainer.config['dataset']['num_workers'],
+            train_split=0.8
+        )
+        
+        print(f"✅ 数据集加载成功:")
+        print(f"  训练集: {train_dataset_len} 张图片")
+        print(f"  验证集: {val_dataset_len} 张图片")
+        print(f"  批次大小: {trainer.config['dataset']['batch_size']}")
+        
+        # 开始训练
+        print("🚀 开始LDM训练...")
+        train_losses, val_losses = trainer.train(train_loader, val_loader)
+        
+        print("🎉 训练完成！")
+        
+    except Exception as e:
+        print(f"❌ 数据集加载失败: {e}")
+        print("\n📋 请检查以下配置:")
+        print(f"  数据集路径: {trainer.config['dataset']['root_dir']}")
+        print(f"  批次大小: {trainer.config['dataset']['batch_size']}")
+        print(f"  工作进程数: {trainer.config['dataset']['num_workers']}")
+        print("\n💡 解决方案:")
+        print("1. 检查数据集路径是否正确")
+        print("2. 确保图片格式为 .jpg")
+        print("3. 检查Kaggle输入数据集是否正确挂载")
+        print("4. 可以尝试减小批次大小或工作进程数")
+        
+        # 提供调试信息
+        print(f"\n🔍 当前工作目录: {os.getcwd()}")
+        if os.path.exists("/kaggle/input"):
+            print("📁 Kaggle输入目录:")
+            for item in os.listdir("/kaggle/input"):
+                item_path = f"/kaggle/input/{item}"
+                if os.path.isdir(item_path):
+                    print(f"  📂 {item}/")
+                    try:
+                        sub_items = os.listdir(item_path)[:5]  # 只显示前5个
+                        for sub_item in sub_items:
+                            print(f"    📄 {sub_item}")
+                        if len(os.listdir(item_path)) > 5:
+                            print(f"    ... 和其他 {len(os.listdir(item_path)) - 5} 个文件")
+                    except:
+                        print(f"    ❌ 无法访问")
+                else:
+                    print(f"  📄 {item}")
+        
+        return
     
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=trainer.config['dataset']['batch_size'],
-        shuffle=False,
-        num_workers=trainer.config['dataset']['num_workers']
-    )
-    
-    # 开始训练
-    trainer.train(train_loader, val_loader)
-    """
-    
-    print("✅ 训练器初始化完成！")
-    print("请根据你的数据集情况修改main()函数中的数据加载部分。")
+    print("✅ LDM训练流程配置完成！")
 
 if __name__ == "__main__":
     main() 
