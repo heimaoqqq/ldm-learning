@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import numpy as np
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, groups=32):
@@ -105,32 +106,96 @@ class PaperDecoder(nn.Module):
 class VectorQuantizer(nn.Module):
     def __init__(self, num_embeddings, embedding_dim, beta=0.25, decay=0.99):
         super().__init__()
-        self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
         self.beta = beta
-        self.decay = decay  # EMA 衰减系数，论文参考值为 0.99
+        self.decay = decay
+        
+        # 初始化嵌入向量
         self.embedding = nn.Embedding(num_embeddings, embedding_dim)
-        self.embedding.weight.data.uniform_(-1.0 / num_embeddings, 1.0 / num_embeddings)
-    
-        # 注册 EMA 相关缓冲区
+        self.embedding.weight.data.uniform_(-1/num_embeddings, 1/num_embeddings)
+        
+        # 用于EMA更新的缓冲区
         self.register_buffer('cluster_size', torch.zeros(num_embeddings))
         self.register_buffer('embedding_avg', self.embedding.weight.data.clone())
         
+        # 累积码本使用统计
+        self.register_buffer('cumulative_usage', torch.zeros(num_embeddings))
+        self.register_buffer('total_updates', torch.tensor(0.0))
+    
+    def reset_usage_stats(self):
+        """重置累积使用统计，通常在每个epoch开始时调用"""
+        self.cumulative_usage.fill_(0)
+        self.total_updates.fill_(0)
+    
+    def get_usage_stats(self):
+        """获取码本使用统计信息"""
+        if self.total_updates > 0:
+            # 计算使用过的码字数量
+            used_codes = (self.cumulative_usage > 0).sum().item()
+            usage_rate = used_codes / self.num_embeddings
+            
+            # 计算使用分布的统计量
+            usage_counts = self.cumulative_usage.cpu().numpy()
+            usage_mean = float(self.cumulative_usage.mean())
+            usage_std = float(self.cumulative_usage.std())
+            
+            return {
+                'usage_rate': usage_rate,
+                'used_codes': used_codes,
+                'total_codes': self.num_embeddings,
+                'usage_counts': usage_counts,
+                'usage_mean': usage_mean,
+                'usage_std': usage_std,
+                'total_updates': int(self.total_updates.item())
+            }
+        else:
+            return {
+                'usage_rate': 0.0,
+                'used_codes': 0,
+                'total_codes': self.num_embeddings,
+                'usage_counts': np.zeros(self.num_embeddings),
+                'usage_mean': 0.0,
+                'usage_std': 0.0,
+                'total_updates': 0
+            }
+
     def forward(self, z):
+        # Flatten input for computation [B, D, H, W] -> [N, D]
         z_flattened = z.permute(0,2,3,1).contiguous().view(-1, self.embedding_dim)
         dist = (z_flattened.pow(2).sum(1, keepdim=True)
                 - 2 * torch.matmul(z_flattened, self.embedding.weight.t())
                 + self.embedding.weight.pow(2).sum(1))
         encoding_indices = torch.argmin(dist, dim=1)
         
-        # 计算编码本使用率 (codebook usage)
+        # 计算当前批次的编码本使用率
+        current_usage_info = {}
         if self.training:
             with torch.no_grad():
-                usage = torch.zeros(self.num_embeddings, device=z.device)
+                # 当前批次使用的码字
+                batch_usage = torch.zeros(self.num_embeddings, device=z.device)
                 ones = torch.ones(encoding_indices.shape[0], device=z.device)
-                usage.index_add_(0, encoding_indices, ones)
-                usage = (usage > 0).float().sum() / self.num_embeddings
-                # 在实际训练中可以将此指标记录到tensorboard
+                batch_usage.index_add_(0, encoding_indices, ones)
+                
+                # 更新累积使用统计
+                self.cumulative_usage += (batch_usage > 0).float()
+                self.total_updates += 1
+                
+                # 当前批次的使用率
+                batch_used_codes = (batch_usage > 0).sum().item()
+                batch_usage_rate = batch_used_codes / self.num_embeddings
+                
+                # 累积使用率
+                cumulative_used_codes = (self.cumulative_usage > 0).sum().item()
+                cumulative_usage_rate = cumulative_used_codes / self.num_embeddings
+                
+                current_usage_info = {
+                    'batch_usage_rate': batch_usage_rate,
+                    'batch_used_codes': batch_used_codes,
+                    'cumulative_usage_rate': cumulative_usage_rate,
+                    'cumulative_used_codes': cumulative_used_codes,
+                    'encoding_indices': encoding_indices.clone()
+                }
         
         # 获取量化后的嵌入向量
         quantized_embeddings = self.embedding(encoding_indices)  # [N, D]
@@ -163,7 +228,7 @@ class VectorQuantizer(nn.Module):
         
         # 直通估计器 (Straight-Through Estimator)
         quantized_straight_through = z + (quantized - z).detach()
-        return quantized_straight_through, commitment_loss, codebook_loss
+        return quantized_straight_through, commitment_loss, codebook_loss, current_usage_info
 
 # 新增：Patch-based Discriminator（来自论文描述）
 class PatchDiscriminator(nn.Module):
@@ -236,9 +301,9 @@ class AdvVQVAE(nn.Module):
     
     def forward(self, x):
         z = self.encoder(x)
-        z_q_straight_through, commitment_loss, codebook_loss = self.vq(z)
+        z_q_straight_through, commitment_loss, codebook_loss, usage_info = self.vq(z)
         x_recon = self.decoder(z_q_straight_through)
-        return x_recon, commitment_loss, codebook_loss
+        return x_recon, commitment_loss, codebook_loss, usage_info
     
     def calculate_losses(self, x, rec_weight=1.0, perceptual_weight=0.1):
         """
@@ -247,7 +312,7 @@ class AdvVQVAE(nn.Module):
         这个方法在训练脚本中被覆盖了，主要参考训练脚本中的损失计算逻辑
         """
         # 获取重建结果和VQ损失
-        x_recon, commitment_loss, codebook_loss = self.forward(x)
+        x_recon, commitment_loss, codebook_loss, usage_info = self.forward(x)
         
         # 重建损失（MSE）
         rec_loss = F.mse_loss(x_recon, x)
@@ -279,7 +344,8 @@ class AdvVQVAE(nn.Module):
             'rec_loss': rec_loss,
             'vq_commitment_loss': commitment_loss,
             'vq_codebook_loss': codebook_loss,
-            'gen_loss': gen_loss
+            'gen_loss': gen_loss,
+            'usage_info': usage_info
         }
     
     def train_step(self, x, gen_optimizer, disc_optimizer, train_disc=True, train_gen=True):
@@ -313,7 +379,7 @@ if __name__ == "__main__":
     disc_optimizer = optim.Adam(model.discriminator.parameters(), lr=1e-4)
     
     # 测试前向传播
-    recon, commit_loss, codebook_loss = model(x)
+    recon, commit_loss, codebook_loss, usage_info = model(x)
     print(f"Input shape: {x.shape}")
     print(f"Output shape: {recon.shape}")
     print(f"VQ commitment loss: {commit_loss.item()}")
