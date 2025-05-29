@@ -27,7 +27,7 @@ print(f"使用验证集进行可视化，验证集样本数: {val_dataset_len}")
 
 # 创建保存目录路径
 save_dir = config['training']['save_dir']
-vis_dir = os.path.join("ae_debug", "adv_vqvae_vis")
+vis_dir = os.path.join("vqvae_vis")  # 改为相对于当前目录的路径
 
 # 初始化基于损失的模型
 loss_model = AdvVQVAE(
