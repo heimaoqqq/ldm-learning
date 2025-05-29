@@ -1,0 +1,125 @@
+# 归一化LDM训练配置
+# 适配32×32×256潜在空间和归一化VQ-VAE
+
+# 数据集配置
+dataset:
+  root_dir: "/kaggle/input/dataset"
+  batch_size: 16                    # 因为空间分辨率增加，减小批次大小
+  num_workers: 4
+  num_classes: 31
+
+# VQ-VAE配置（预训练模型）
+vqvae:
+  model_path: "/kaggle/input/vae-best-fid2/adv_vqvae_best_fid2.pth"
+  in_channels: 3
+  latent_dim: 256
+  num_embeddings: 512
+  beta: 0.25
+  decay: 0.99
+  groups: 32
+
+# 归一化方法
+normalization_method: "standardize"  # 'standardize' 或 'minmax'
+
+# CLDM模型配置 - 适配32×32×256潜在空间
+cldm:
+  model_type: "PaperStandardCLDM"
+  latent_dim: 256                   # VQ-VAE潜在空间维度
+  num_classes: 31
+  
+  # DDPM配置
+  num_timesteps: 1000
+  beta_schedule: "linear"
+  beta_start: 0.0001
+  beta_end: 0.02
+  
+  # U-Net架构配置 - 针对32×32潜在空间优化
+  model_channels: 128               # 基础通道数，保持合理以控制内存
+  time_emb_dim: 256                 # 时间嵌入维度
+  class_emb_dim: 256                # 类别嵌入维度
+  channel_mult: [1, 2, 4]           # 通道倍增 [128, 256, 512]
+  num_res_blocks: 2                 # 每层2个残差块
+  attention_resolutions: [16, 8]    # 适配32×32：在16×16和8×8分辨率使用注意力
+  dropout: 0.1                      # 增加正则化
+  
+  # EMA配置
+  use_ema: true
+  ema_decay: 0.9999
+
+# 训练配置
+training:
+  epochs: 300                       # 充分训练
+  lr: 0.0001                        # 学习率
+  weight_decay: 0.01                # 权重衰减
+  
+  # 学习率调度
+  use_scheduler: true
+  scheduler_type: "cosine"
+  warmup_epochs: 10
+  min_lr: 0.00001
+  
+  # 优化器参数
+  optimizer: "Adam"
+  beta1: 0.9
+  beta2: 0.999
+  eps: 0.00000001
+  
+  # 梯度相关
+  grad_clip_norm: 1.0
+  
+  # 验证和保存
+  val_interval: 10
+  save_interval: 25
+  sample_interval: 15
+  
+  # 采样配置
+  sampling_steps: 100               # DDIM采样步数
+  eta: 0.0
+  
+  # FID评估配置
+  fid_eval_freq: 25
+  num_sample_images: 500
+  fid_sampling_steps: 200
+  
+  # 保存路径
+  save_dir: "/kaggle/working/ldm_normalized_32x32"
+
+# 系统配置
+system:
+  device: "cuda"
+  mixed_precision: false
+  seed: 42
+
+# 模型架构说明
+architecture_notes:
+  latent_space: "32x32x256"         # 从16x16x256升级
+  spatial_resolution_increase: "4x" # 分辨率增加4倍
+  
+  # 注意力配置说明
+  attention_explanation: |
+    原来16×16潜在空间使用attention_resolutions: [8]
+    现在32×32潜在空间使用attention_resolutions: [16, 8]
+    - 32×32 → 16×16 (第一层下采样)
+    - 16×16 → 8×8  (第二层下采样，使用注意力)
+    - 8×8  → 4×4   (第三层下采样，使用注意力)
+  
+  # 内存使用估计
+  memory_increase: |
+    空间分辨率从16×16增加到32×32，内存使用约增加4倍
+    建议：
+    - 减小批次大小：32 → 16
+    - 监控GPU内存使用
+    - 必要时进一步减小批次大小
+
+# 调试和监控
+debug:
+  print_model_summary: true
+  validate_latent_range: true       # 验证潜在编码范围
+  log_attention_maps: false         # 注意力图日志（可选）
+  save_debug_samples: true          # 保存调试样本
+
+# 性能优化
+optimization:
+  gradient_checkpointing: false     # 如果内存不足可启用
+  compile_model: false              # PyTorch 2.0编译（可选）
+  pin_memory: true                  # 数据加载优化 
