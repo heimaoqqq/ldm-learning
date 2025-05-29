@@ -134,7 +134,7 @@ with torch.no_grad():
         # 收集所有可用模型的重建结果
         model_results = []
         for config_item in available_models:
-            recon, _, _ = config_item['model'](images)
+            recon, _, _, _ = config_item['model'](images)  # 模型返回4个值：recon, commitment_loss, codebook_loss, usage_info
             recon_norm = denormalize(recon)
             model_results.append((recon_norm, config_item['name']))
         
@@ -145,7 +145,7 @@ with torch.no_grad():
         
         # 同时为每个模型单独保存图像（保持兼容性）
         for config_item in available_models:
-            recon, _, _ = config_item['model'](images)
+            recon, _, _, _ = config_item['model'](images)  # 修复这里也需要4个值
             recon_norm = denormalize(recon)
             single_path = os.path.join(vis_dir, f"{config_item['short_name']}_batch_{i+1}.png")
             
