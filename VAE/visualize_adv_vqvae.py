@@ -26,29 +26,15 @@ _, val_loader, _, val_dataset_len = build_dataloader(
 print(f"使用验证集进行可视化，验证集样本数: {val_dataset_len}")
 
 # 创建保存目录路径
-save_dir = config['training']['save_dir']
+# save_dir = config['training']['save_dir'] # 不再使用配置文件中的save_dir
 vis_dir = os.path.join("vqvae_vis")  # 改为相对于当前目录的路径
 
-# 定义三种模型的配置
+# 定义要可视化的模型配置
 model_configs = [
     {
-        'name': '基于重建损失模型',
-        'filename': 'adv_vqvae_best_loss.pth',
-        'short_name': 'rec_loss',
-        'model': None,
-        'available': False
-    },
-    {
-        'name': '基于综合损失模型', 
-        'filename': 'adv_vqvae_best_combined_loss.pth',
-        'short_name': 'combined_loss',
-        'model': None,
-        'available': False
-    },
-    {
-        'name': '基于FID模型',
-        'filename': 'adv_vqvae_best_fid.pth', 
-        'short_name': 'fid',
+        'name': '预训练FID模型', # 修改名称以反映实际加载的模型
+        'filename': '/kaggle/input/vae-best-fid2/adv_vqvae_best_fid2.pth', # 直接使用你的路径
+        'short_name': 'pretrained_fid',
         'model': None,
         'available': False
     }
@@ -68,7 +54,7 @@ for config_item in model_configs:
     ).to(device)
     
     # 尝试加载权重
-    weights_path = os.path.join(save_dir, config_item['filename'])
+    weights_path = config_item['filename'] # 直接使用filename作为完整路径
     if os.path.exists(weights_path):
         model.load_state_dict(torch.load(weights_path, map_location=device))
         config_item['model'] = model
