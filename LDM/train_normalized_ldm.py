@@ -239,29 +239,35 @@ class NormalizedVQVAEWrapper:
         print(f"🔍 原始编码统计: 均值={all_encodings.mean():.4f}, 标准差={all_encodings.std():.4f}")
         
         if self.norm_vqvae.normalization_method == 'standardize':
-            self.norm_vqvae.mean = all_encodings.mean()
-            self.norm_vqvae.std = all_encodings.std()
-            print(f"📊 真实数据标准化统计量: 均值={self.norm_vqvae.mean:.4f}, 标准差={self.norm_vqvae.std:.4f}")
+            # 直接使用NormalizedVQVAE的fit_normalization_stats方法
+            # 这样确保统计量正确保存到模型中
+            self.norm_vqvae.mean = all_encodings.mean().to(self.device)
+            self.norm_vqvae.std = all_encodings.std().to(self.device)
+            self.norm_vqvae.is_fitted = torch.tensor(True).to(self.device)
+            
+            print(f"📊 标准化统计量: 均值={self.norm_vqvae.mean:.4f}, 标准差={self.norm_vqvae.std:.4f}")
             
             # 测试归一化效果
-            normalized_sample = (all_encodings[:100] - self.norm_vqvae.mean) / (self.norm_vqvae.std + 1e-5)
-            print(f"🧪 归一化后范围: [{normalized_sample.min():.4f}, {normalized_sample.max():.4f}]")
-            print(f"🧪 归一化后统计: 均值={normalized_sample.mean():.4f}, 标准差={normalized_sample.std():.4f}")
+            test_sample = all_encodings[:100].to(self.device)
+            normalized_test = (test_sample - self.norm_vqvae.mean) / (self.norm_vqvae.std + 1e-5)
+            print(f"🧪 归一化测试: [{normalized_test.min():.4f}, {normalized_test.max():.4f}], 均值={normalized_test.mean():.4f}, 标准差={normalized_test.std():.4f}")
             
         elif self.norm_vqvae.normalization_method == 'minmax':
-            self.norm_vqvae.min_val = all_encodings.min()
-            self.norm_vqvae.max_val = all_encodings.max()
-            print(f"📊 真实数据Min-Max统计量: 范围=[{self.norm_vqvae.min_val:.4f}, {self.norm_vqvae.max_val:.4f}]")
+            self.norm_vqvae.min_val = all_encodings.min().to(self.device)
+            self.norm_vqvae.max_val = all_encodings.max().to(self.device)
+            self.norm_vqvae.is_fitted = torch.tensor(True).to(self.device)
+            
+            print(f"📊 Min-Max统计量: 范围=[{self.norm_vqvae.min_val:.4f}, {self.norm_vqvae.max_val:.4f}]")
             
             # 测试归一化效果
-            normalized_sample = 2.0 * (all_encodings[:100] - self.norm_vqvae.min_val) / (self.norm_vqvae.max_val - self.norm_vqvae.min_val + 1e-5) - 1.0
-            print(f"🧪 归一化后范围: [{normalized_sample.min():.4f}, {normalized_sample.max():.4f}]")
+            test_sample = all_encodings[:100].to(self.device)
+            normalized_test = 2.0 * (test_sample - self.norm_vqvae.min_val) / (self.norm_vqvae.max_val - self.norm_vqvae.min_val + 1e-5) - 1.0
+            print(f"🧪 归一化测试: [{normalized_test.min():.4f}, {normalized_test.max():.4f}]")
         
-        self.norm_vqvae.is_fitted = torch.tensor(True)
         self.is_fitted = True
         print("✅ 真实数据归一化统计量计算完成！")
         
-        # 启用调试模式进行验证
+        # 强制启用调试模式进行下次验证
         self.norm_vqvae._debug = True
         print("🔧 已启用归一化调试模式")
     
@@ -401,7 +407,7 @@ class LDMTrainer:
         total_loss = 0
         num_batches = len(dataloader)
         
-        # 使用简化的进度条，避免重复显示
+        # 简化的训练循环，只在第一个batch显示编码统计
         for batch_idx, (images, labels) in enumerate(dataloader):
             images = images.to(self.device)
             labels = labels.to(self.device)
@@ -437,13 +443,6 @@ class LDMTrainer:
             self.optimizer.step()
             
             total_loss += loss.item()
-            
-            # 简化的进度显示 - 每25个批次或最后一个批次显示
-            if (batch_idx + 1) % 25 == 0 or batch_idx == num_batches - 1:
-                progress = (batch_idx + 1) / num_batches * 100
-                current_avg_loss = total_loss / (batch_idx + 1)
-                print(f"Epoch {self.epoch}: [{batch_idx+1:4d}/{num_batches}] "
-                      f"({progress:5.1f}%) Loss: {current_avg_loss:.6f}")
         
         avg_loss = total_loss / num_batches
         return avg_loss
