@@ -154,7 +154,7 @@ def calculate_fid(model, val_loader, temp_real_dir, temp_gen_dir, sample_size=10
                 
                 # 通过模型获取重建图像
                 val_z = model.encoder(val_images)
-                val_z_q, _, _ = model.vq(val_z)
+                val_z_q, _, _, _ = model.vq(val_z)  # 新增usage_info返回值
                 val_recons = model.decoder(val_z_q)
                 
                 # 反归一化
@@ -279,7 +279,7 @@ def calculate_fid_simple(model, val_loader, sample_size=1000):
                 
                 # 使用模型生成重建图像
                 z = model.encoder(val_images)
-                z_q, _, _ = model.vq(z)
+                z_q, _, _, _ = model.vq(z)  # 新增usage_info返回值
                 recons = model.decoder(z_q)
                 
                 # 保存真实图像和生成图像用于FID计算
@@ -385,6 +385,12 @@ print(f"注意: vq_commit_weight 是 VQ commitment loss 中的 beta。总的 VQ 
 
 for epoch in range(epochs):
     model.train() # 设置为训练模式
+    
+    # 在每个epoch开始时重置码本使用统计
+    if hasattr(model.vq, 'reset_usage_stats'):
+        model.vq.reset_usage_stats()
+        print(f"  已重置累积码本使用计数器。")
+    
     running_rec_loss = 0.0
     running_vq_commit_loss = 0.0 # VQ commitment loss (beta * ||E(x) - sg(z_q)||^2)
     running_vq_codebook_loss = 0.0 # VQ codebook loss (||sg(E(x)) - z_q||^2)
@@ -409,7 +415,7 @@ for epoch in range(epochs):
             
             with torch.no_grad(): # 生成器部分不计算梯度
                 z = model.encoder(images)
-                z_q, _, _ = model.vq(z) 
+                z_q, _, _, _ = model.vq(z)  # 新增usage_info返回值
                 fake_images = model.decoder(z_q)
             
             real_preds = model.discriminator(images)
@@ -435,8 +441,9 @@ for epoch in range(epochs):
         # z_q_straight_through 是直通估计器的输出，用于解码器
         # vq_commit_loss_val 是 beta * ||E(x) - sg(z_q)||^2
         # vq_codebook_loss_val 是 ||sg(E(x)) - z_q||^2
+        # usage_info 是码本使用信息
         z = model.encoder(images)
-        z_q_straight_through, vq_commit_loss_val, vq_codebook_loss_val = model.vq(z)
+        z_q_straight_through, vq_commit_loss_val, vq_codebook_loss_val, usage_info = model.vq(z)
         recons = model.decoder(z_q_straight_through)
         
         rec_loss = nn.MSELoss()(recons, images)
@@ -483,11 +490,23 @@ for epoch in range(epochs):
     else:
         epoch_disc_loss = 0.0
 
-    print(f"Epoch {epoch+1} Training Losses:")
-    print(f"  Rec Loss: {epoch_rec_loss:.6f}, VQ Commit Loss: {epoch_vq_commit_loss:.6f}, VQ Codebook Loss: {epoch_vq_codebook_loss:.6f}")
-    print(f"  Gen Adversarial Loss: {epoch_gen_adv_loss:.6f}, Perceptual Loss: {epoch_perc_loss:.6f}")
-    print(f"  Disc Loss: {epoch_disc_loss:.6f} (trained on {disc_batches_trained} batches)")
+    # 获取码本使用统计
+    if hasattr(model.vq, 'get_usage_stats'):
+        usage_stats = model.vq.get_usage_stats()
+        usage_rate = usage_stats['usage_rate']
+        used_codes = usage_stats['used_codes']
+        total_codes = usage_stats['total_codes']
+    else:
+        usage_rate = 0.0
+        used_codes = 0
+        total_codes = config['model']['num_embeddings']
 
+    print(f"📊 Epoch {epoch+1} Training Summary:")
+    print(f"     Avg Gen Loss: {epoch_rec_loss + epoch_vq_commit_loss + epoch_vq_codebook_loss + epoch_gen_adv_loss + epoch_perc_loss:.4f}, Avg Disc Loss: {epoch_disc_loss:.4f}")
+    print(f"     Avg Rec Loss: {epoch_rec_loss:.4f}, Avg Perceptual Loss: {epoch_perc_loss:.4f}")
+    print(f"     Avg VQ Commit: {epoch_vq_commit_loss:.4f}, Avg VQ Codebook: {epoch_vq_codebook_loss:.4f}")
+    print(f"     📈 Cumulative Codebook Usage (end of epoch): {usage_rate:.2%}")
+    
     # --- 在验证集上评估 ---
     model.eval() # 设置为评估模式
     val_running_rec_loss = 0.0
@@ -500,7 +519,7 @@ for epoch in range(epochs):
             val_images = val_images.to(device)
             
             val_z = model.encoder(val_images)
-            val_z_q_st, val_vq_commit, val_vq_codebook = model.vq(val_z)
+            val_z_q_st, val_vq_commit, val_vq_codebook, val_usage_info = model.vq(val_z)  # 新增usage_info返回值
             val_recons = model.decoder(val_z_q_st)
             
             val_rec = nn.MSELoss()(val_recons, val_images)
@@ -524,10 +543,10 @@ for epoch in range(epochs):
                          val_l_reg + 
                          perceptual_weight * epoch_val_perc_loss)
 
-    print(f"Epoch {epoch+1} Validation Losses:")
-    print(f"  Val Rec Loss: {epoch_val_rec_loss:.6f}, Val VQ Commit: {epoch_val_vq_commit_loss:.6f}, Val VQ Codebook: {epoch_val_vq_codebook_loss:.6f}")
-    print(f"  Val Perceptual Loss: {epoch_val_perc_loss:.6f}")
-    print(f"  Current Combined Val Loss: {current_val_loss:.6f}")
+    print(f"📉 Epoch {epoch+1} Validation Summary - Combined Loss: {current_val_loss:.4f}")
+    print(f"     Avg Rec: {epoch_val_rec_loss:.4f}, Avg Perc: {epoch_val_perc_loss:.4f}")
+    print(f"     Avg VQ Commit: {epoch_val_vq_commit_loss:.4f}, Avg VQ Codebook: {epoch_val_vq_codebook_loss:.4f}")
+    print(f"     📊 当前累积码本使用率: {usage_rate:.2%} ({used_codes}/{total_codes} 码字)")
 
     # 保存基于验证重建损失的最佳模型（主要策略）
     if epoch_val_rec_loss < best_val_rec_loss:
