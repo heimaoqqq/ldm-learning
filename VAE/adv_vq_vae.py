@@ -38,9 +38,8 @@ class PaperEncoder(nn.Module):
         self.res2 = ResidualBlock(64, 128, groups)
         self.down2 = nn.Conv2d(128, 128, 3, 2, 1)  # 32x32
         
+        # 移除第三次下采样，保持32x32的分辨率
         self.res3 = ResidualBlock(128, 256, groups)
-        self.down3 = nn.Conv2d(256, 256, 3, 2, 1)  # 16x16
-        
         self.res4 = ResidualBlock(256, latent_dim, groups)
     
     def forward(self, x):
@@ -50,7 +49,6 @@ class PaperEncoder(nn.Module):
         x = self.res2(x)
         x = self.down2(x)
         x = self.res3(x)
-        x = self.down3(x)
         x = self.res4(x)
         return x
 
@@ -60,55 +58,56 @@ class PaperDecoder(nn.Module):
         super().__init__()
         self.res1 = ResidualBlock(latent_dim, 256, groups)
         
-        # 使用双线性上采样+卷积替代转置卷积
-        self.up1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.conv1 = nn.Conv2d(256, 256, 3, 1, 1)
-        self.gn1 = nn.GroupNorm(groups, 256)
-        
+        # 从32x32开始上采样到64x64
         self.res2 = ResidualBlock(256, 128, groups)
-        self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.conv2 = nn.Conv2d(128, 128, 3, 1, 1)
-        self.gn2 = nn.GroupNorm(groups, 128)
+        self.up1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.conv1 = nn.Conv2d(128, 128, 3, 1, 1)
+        self.gn1 = nn.GroupNorm(groups, 128)
         
+        # 从64x64上采样到128x128
         self.res3 = ResidualBlock(128, 64, groups)
-        self.up3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.conv3 = nn.Conv2d(64, 64, 3, 1, 1)
-        self.gn3 = nn.GroupNorm(groups, 64)
+        self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.conv2 = nn.Conv2d(64, 64, 3, 1, 1)
+        self.gn2 = nn.GroupNorm(groups, 64)
         
+        # 从128x128上采样到256x256
         self.res4 = ResidualBlock(64, 32, groups)
-        self.up4 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.conv4 = nn.Conv2d(32, out_channels, 3, 1, 1)
+        self.up3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.conv3 = nn.Conv2d(32, out_channels, 3, 1, 1)
         self.relu = nn.ReLU(inplace=True)
     
     def forward(self, x):
+        # 从32x32开始
         x = self.res1(x)
         
-        x = self.up1(x)
+        x = self.res2(x)
+        x = self.up1(x)  # 32x32 -> 64x64
         x = self.relu(self.gn1(self.conv1(x)))
         
-        x = self.res2(x)
-        x = self.up2(x)
+        x = self.res3(x)
+        x = self.up2(x)  # 64x64 -> 128x128
         x = self.relu(self.gn2(self.conv2(x)))
         
-        x = self.res3(x)
-        x = self.up3(x)
-        x = self.relu(self.gn3(self.conv3(x)))
-        
         x = self.res4(x)
-        x = self.up4(x)
-        x = self.conv4(x)
+        x = self.up3(x)  # 128x128 -> 256x256
+        x = self.conv3(x)
         
         return torch.tanh(x)
 
 class VectorQuantizer(nn.Module):
-    def __init__(self, num_embeddings, embedding_dim, beta=0.25):
+    def __init__(self, num_embeddings, embedding_dim, beta=0.25, decay=0.99):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
         self.beta = beta
+        self.decay = decay  # EMA 衰减系数，论文参考值为 0.99
         self.embedding = nn.Embedding(num_embeddings, embedding_dim)
         self.embedding.weight.data.uniform_(-1.0 / num_embeddings, 1.0 / num_embeddings)
     
+        # 注册 EMA 相关缓冲区
+        self.register_buffer('cluster_size', torch.zeros(num_embeddings))
+        self.register_buffer('embedding_avg', self.embedding.weight.data.clone())
+        
     def forward(self, z):
         z_flattened = z.permute(0,2,3,1).contiguous().view(-1, self.embedding_dim)
         dist = (z_flattened.pow(2).sum(1, keepdim=True)
@@ -125,13 +124,38 @@ class VectorQuantizer(nn.Module):
                 usage = (usage > 0).float().sum() / self.num_embeddings
                 # 在实际训练中可以将此指标记录到tensorboard
         
-        quantized = self.embedding(encoding_indices).view(z.shape)
-        commitment_loss = self.beta * F.mse_loss(quantized.detach(), z)
+        # 获取量化后的嵌入向量
+        quantized_embeddings = self.embedding(encoding_indices)  # [N, D]
+        quantized = quantized_embeddings.view(z.shape)  # [B, D, H, W]
         
-        # 修改直通估计器，避免原地操作
-        # 原版: quantized = z + (quantized - z).detach()
-        quantized_new = z + (quantized - z).detach()
-        return quantized_new, commitment_loss
+        # 计算 Codebook loss: ||sg(E(x)) - z_q||^2_2
+        codebook_loss = F.mse_loss(quantized_embeddings, z_flattened.detach())
+        
+        # 计算 Commitment loss: beta * ||E(x) - sg(z_q)||^2_2
+        commitment_loss = self.beta * F.mse_loss(z_flattened, quantized_embeddings.detach())
+        
+        # 使用 EMA 更新码本 (仅在训练模式下)
+        if self.training:
+            # 转换为 one-hot 编码
+            encodings = F.one_hot(encoding_indices, self.num_embeddings).float()
+            
+            # EMA 更新簇大小
+            self.cluster_size.data = self.decay * self.cluster_size + (1 - self.decay) * encodings.sum(0)
+        
+            # 避免除零问题
+            n = self.cluster_size.sum()
+            cluster_size = (self.cluster_size + 1e-5) / (n + self.num_embeddings * 1e-5) * n
+            
+            # 更新嵌入向量的移动平均
+            dw = torch.matmul(encodings.t(), z_flattened)
+            self.embedding_avg.data = self.decay * self.embedding_avg + (1 - self.decay) * dw
+            
+            # 更新码本权重 (嵌入向量)
+            self.embedding.weight.data = self.embedding_avg / cluster_size.unsqueeze(1)
+        
+        # 直通估计器 (Straight-Through Estimator)
+        quantized_straight_through = z + (quantized - z).detach()
+        return quantized_straight_through, commitment_loss, codebook_loss
 
 # 新增：Patch-based Discriminator（来自论文描述）
 class PatchDiscriminator(nn.Module):
@@ -184,18 +208,18 @@ class AdvVQVAE(nn.Module):
     """
     基于论文描述的对抗训练VQ-VAE，添加了patch-based discriminator
     """
-    def __init__(self, in_channels=3, latent_dim=256, num_embeddings=512, beta=0.25, groups=32, 
+    def __init__(self, in_channels=3, latent_dim=256, num_embeddings=512, beta=0.25, decay=0.99, groups=32, 
                  disc_ndf=64):
         super().__init__()
         self.encoder = PaperEncoder(in_channels, latent_dim, groups)
-        self.vq = VectorQuantizer(num_embeddings, latent_dim, beta)
+        self.vq = VectorQuantizer(num_embeddings, latent_dim, beta, decay)
         self.decoder = PaperDecoder(latent_dim, in_channels, groups)
         self.discriminator = PatchDiscriminator(in_channels, disc_ndf)
     
     def encode(self, x):
         """编码函数，返回量化后的潜在表示"""
         z = self.encoder(x)
-        z_q, _ = self.vq(z)
+        z_q, _, _ = self.vq(z)
         return z_q
     
     def decode(self, z_q):
@@ -204,17 +228,18 @@ class AdvVQVAE(nn.Module):
     
     def forward(self, x):
         z = self.encoder(x)
-        z_q, vq_loss = self.vq(z)
-        x_recon = self.decoder(z_q)
-        return x_recon, vq_loss
+        z_q_straight_through, commitment_loss, codebook_loss = self.vq(z)
+        x_recon = self.decoder(z_q_straight_through)
+        return x_recon, commitment_loss, codebook_loss
     
     def calculate_losses(self, x, rec_weight=1.0, perceptual_weight=0.1):
         """
         计算完整的损失函数，包括重建损失、VQ损失和对抗损失
         根据论文公式：L_Stage1 = min_{E,D} max_D (L_rec(x, D(E(x))) - L_adv(D(E(x))) + log(D(x)) + L_reg(x; E, D))
+        这个方法在训练脚本中被覆盖了，主要参考训练脚本中的损失计算逻辑
         """
         # 获取重建结果和VQ损失
-        x_recon, vq_loss = self.forward(x)
+        x_recon, commitment_loss, codebook_loss = self.forward(x)
         
         # 重建损失（MSE）
         rec_loss = F.mse_loss(x_recon, x)
@@ -238,13 +263,14 @@ class AdvVQVAE(nn.Module):
         # 对于判别器，目标是最小化：-disc_loss
         
         # 生成器总损失
-        gen_total_loss = rec_weight * rec_loss + vq_loss - gen_loss
+        gen_total_loss = rec_weight * rec_loss + (commitment_loss + codebook_loss) - gen_loss # 示例性修改，实际看训练脚本
         
         return {
             'gen_total_loss': gen_total_loss,
             'disc_loss': disc_loss,
             'rec_loss': rec_loss,
-            'vq_loss': vq_loss,
+            'vq_commitment_loss': commitment_loss,
+            'vq_codebook_loss': codebook_loss,
             'gen_loss': gen_loss
         }
     
@@ -270,7 +296,7 @@ class AdvVQVAE(nn.Module):
 
 if __name__ == "__main__":
     # 测试代码
-    model = AdvVQVAE(in_channels=3, latent_dim=256, num_embeddings=512)
+    model = AdvVQVAE(in_channels=3, latent_dim=256, num_embeddings=512, decay=0.99)
     x = torch.randn(2, 3, 256, 256)
     
     # 创建优化器
@@ -279,10 +305,11 @@ if __name__ == "__main__":
     disc_optimizer = optim.Adam(model.discriminator.parameters(), lr=1e-4)
     
     # 测试前向传播
-    recon, loss = model(x)
+    recon, commit_loss, codebook_loss = model(x)
     print(f"Input shape: {x.shape}")
     print(f"Output shape: {recon.shape}")
-    print(f"VQ loss: {loss.item()}")
+    print(f"VQ commitment loss: {commit_loss.item()}")
+    print(f"VQ codebook loss: {codebook_loss.item()}")
     
     # 测试损失计算
     losses = model.calculate_losses(x)

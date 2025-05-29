@@ -1,0 +1,115 @@
+# LDM (Latent Diffusion Model) 配置文件
+
+# VAE 相关配置 (使用预训练的VQ-VAE)
+vae:
+  model_path: "/kaggle/input/vae-best-fid2/adv_vqvae_best_fid2.pth"  # VQ-VAE模型路径
+  in_channels: 3
+  latent_dim: 256
+  num_embeddings: 512
+  beta: 0.25
+  vq_ema_decay: 0.99
+  groups: 32
+  freeze: true  # 冻结VAE参数
+
+# 数据集配置
+dataset:
+  root_dir: "/kaggle/input/dataset"  # 微多普勒时频图数据集路径
+  batch_size: 16  # 推荐8-16 (大latent图)
+  num_workers: 4
+  val_split: 0.2
+  image_size: 256
+
+# 扩散模型配置
+diffusion:
+  timesteps: 1000  # 扩散步数T
+  noise_schedule: "cosine"  # linear 或 cosine (余弦调度更平滑)
+  beta_start: 0.0001
+  beta_end: 0.02
+  clip_denoised: true
+
+# U-Net 网络结构配置
+unet:
+  # 输入维度
+  in_channels: 256  # 潜在空间通道数，与VAE的latent_dim一致
+  out_channels: 256  # 输出通道数 (预测噪声)
+  model_channels: 128  # 基础通道数
+  
+  # 时间嵌入
+  time_embed_dim: 512  # 时间步嵌入维度
+  
+  # 条件嵌入 (身份标签)
+  num_classes: 31  # 类别数量 (ID_1到ID_31，共31个用户)
+  class_embed_dim: 256  # 类别嵌入维度
+  
+  # 网络层配置
+  num_res_blocks: 2  # 每层的残差块数量
+  attention_resolutions: [8, 16]  # 添加attention的分辨率 (32x32的1/4和1/2)
+  channel_mult: [1, 2, 4, 4]  # 各层通道倍数
+  num_heads: 8  # 注意力头数
+  use_scale_shift_norm: true  # 使用条件归一化
+  dropout: 0.1  # Dropout率
+  
+  # 条件机制
+  use_cross_attention: true  # 使用交叉注意力融合条件
+  use_self_attention: true   # 使用自注意力
+
+# 训练配置
+training:
+  epochs: 500
+  lr: 1e-4  # AdamW学习率
+  weight_decay: 0.01
+  warmup_steps: 1000  # 学习率预热步数
+  
+  # 保存设置
+  save_dir: "ldm_models"
+  save_interval: 50  # 每隔多少epoch保存一次
+  sample_interval: 10  # 每隔多少epoch生成样本
+  log_interval: 100  # 每隔多少步打印日志
+  
+  # 损失权重
+  noise_loss_weight: 1.0
+  
+  # Classifier-Free Guidance
+  use_cfg: true  # 使用无分类器引导
+  cfg_dropout_prob: 0.1  # 条件丢弃概率 (用于CFG训练)
+  
+  # 梯度裁剪
+  grad_clip_norm: 1.0
+  
+  # 调度器
+  use_scheduler: true
+  scheduler_type: "cosine"  # linear, cosine, exponential
+
+# FID评估配置
+fid_evaluation:
+  enabled: true  # 是否启用FID评估
+  eval_interval: 10  # 每隔多少epoch进行FID评估
+  num_samples: 500  # FID评估时的生成样本数
+  batch_size: 4  # FID评估时的批量大小
+  max_real_samples: 1000  # 计算真实数据特征时的最大样本数
+  save_best_fid_model: true  # 是否保存最佳FID模型
+
+# 推理配置
+inference:
+  num_inference_steps: 50  # 推理时的去噪步数 (可以少于训练时的timesteps)
+  guidance_scale: 7.5  # CFG引导强度
+  eta: 0.0  # DDIM参数 (0为确定性采样)
+  
+  # 采样配置
+  sample_batch_size: 4
+  num_samples_per_class: 8  # 每个类别生成的样本数
+  
+  # 输出设置
+  output_dir: "generated_samples"
+  save_format: "png"
+
+# 设备配置
+device: "auto"  # auto, cpu, cuda
+mixed_precision: true  # 使用混合精度训练
+
+# 日志配置
+logging:
+  use_wandb: false  # 是否使用wandb
+  project_name: "LDM-Gait"
+  experiment_name: "ldm_micro_doppler_32x32_latent"  # 微多普勒特征图实验
+  log_dir: "logs" 
