@@ -83,6 +83,10 @@ class NormalizedVQVAE(nn.Module):
         """归一化编码"""
         if not self.is_fitted:
             raise RuntimeError("必须先调用fit_normalization_stats()来计算统计量！")
+        
+        if hasattr(self, '_debug') and self._debug:
+            print(f"🔍 归一化前: 输入范围[{z.min():.4f}, {z.max():.4f}], 均值={z.mean():.4f}, 标准差={z.std():.4f}")
+            print(f"🔍 统计量: mean={self.mean:.4f}, std={self.std:.4f}")
             
         if self.normalization_method == 'standardize':
             # Z-score标准化
@@ -95,6 +99,11 @@ class NormalizedVQVAE(nn.Module):
             # 再缩放到目标范围
             target_min, target_max = self.target_range
             z_normalized = z_01 * (target_max - target_min) + target_min
+        
+        if hasattr(self, '_debug') and self._debug:
+            print(f"🔍 归一化后: 输出范围[{z_normalized.min():.4f}, {z_normalized.max():.4f}], 均值={z_normalized.mean():.4f}, 标准差={z_normalized.std():.4f}")
+            # 只在第一次显示调试信息后关闭，避免刷屏
+            self._debug = False
             
         return z_normalized
     
@@ -131,12 +140,23 @@ class NormalizedVQVAE(nn.Module):
     
     def encode_without_vq(self, x):
         """只进行编码和归一化，不经过VQ层（用于LDM训练）"""
+        if not self.is_fitted:
+            raise RuntimeError("必须先调用fit_normalization_stats()来计算统计量！")
+            
         z = self.vqvae.encoder(x)
         z_normalized = self.normalize_encoding(z)
+        
+        # 添加调试信息（只在需要时）
+        if hasattr(self, '_debug') and self._debug:
+            print(f"🔍 编码调试: 原始范围[{z.min():.4f}, {z.max():.4f}] -> 归一化后[{z_normalized.min():.4f}, {z_normalized.max():.4f}]")
+        
         return z_normalized
     
     def decode_from_normalized(self, z_normalized):
         """从归一化的编码直接解码（用于LDM采样）"""
+        if not self.is_fitted:
+            raise RuntimeError("必须先调用fit_normalization_stats()来计算统计量！")
+            
         z_denormalized = self.denormalize_encoding(z_normalized)
         return self.vqvae.decoder(z_denormalized)
     
