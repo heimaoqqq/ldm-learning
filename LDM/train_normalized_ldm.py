@@ -1,6 +1,7 @@
 """
 集成的LDM训练脚本
 支持归一化VQ-VAE，适配32×32×256潜在空间
+修复Kaggle环境数据集结构和参数问题
 """
 
 import torch
@@ -9,11 +10,16 @@ import torch.optim as optim
 import yaml
 import os
 import sys
+import glob
 from tqdm import tqdm
 import numpy as np
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
+from PIL import Image
+from torch.utils.data import Dataset
+import torchvision.transforms as transforms
+from sklearn.model_selection import train_test_split
 
 # 添加VAE目录到路径以导入归一化模块
 sys.path.append('../VAE')
@@ -23,10 +29,151 @@ from adv_vq_vae import AdvVQVAE
 # 导入现有的CLDM模型
 from cldm_paper_standard import PaperStandardCLDM
 
+class SimpleGaitDataset(Dataset):
+    """简化的步态数据集类，适配Kaggle数据结构"""
+    def __init__(self, image_paths, class_ids, transform=None):
+        self.image_paths = image_paths
+        self.class_ids = class_ids
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        try:
+            image = Image.open(img_path).convert('RGB')
+            if self.transform:
+                image = self.transform(image)
+            label = self.class_ids[idx]
+            return image, label
+        except Exception as e:
+            print(f"错误加载图片 {img_path}: {e}")
+            # 返回一个默认图片
+            default_image = torch.zeros(3, 256, 256)
+            return default_image, 0
+
+def build_kaggle_dataloader(root_dir, batch_size=8, num_workers=2, val_split=0.2):
+    """
+    适配Kaggle数据集结构的数据加载器
+    支持ID_X目录结构和递归文件查找
+    """
+    transform = transforms.Compose([
+        transforms.Resize((256, 256)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    ])
+
+    print(f"🔍 扫描数据集目录: {root_dir}")
+    
+    # 收集所有图片路径和类别
+    all_image_paths = []
+    all_class_ids = []
+    
+    # 扫描所有ID目录
+    id_dirs = [d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d)) and d.startswith('ID_')]
+    id_dirs.sort()
+    
+    print(f"📁 找到 {len(id_dirs)} 个ID目录: {id_dirs[:5]}{'...' if len(id_dirs) > 5 else ''}")
+    
+    for id_dir in id_dirs:
+        id_path = os.path.join(root_dir, id_dir)
+        
+        # 提取类别ID
+        try:
+            class_id = int(id_dir.replace('ID_', '')) - 1  # 转换为0-based索引
+        except:
+            print(f"⚠️ 无法解析ID目录: {id_dir}")
+            continue
+            
+        # 收集该ID下的所有jpg文件
+        jpg_files = glob.glob(os.path.join(id_path, "*.jpg"))
+        
+        if jpg_files:
+            all_image_paths.extend(jpg_files)
+            all_class_ids.extend([class_id] * len(jpg_files))
+            print(f"  📂 {id_dir}: {len(jpg_files)} 张图片, 类别ID: {class_id}")
+    
+    if not all_image_paths:
+        # 如果按目录结构没找到，尝试直接在根目录查找
+        jpg_files = glob.glob(os.path.join(root_dir, "**/*.jpg"), recursive=True)
+        print(f"🔍 递归查找到 {len(jpg_files)} 个jpg文件")
+        
+        for img_path in jpg_files:
+            filename = os.path.basename(img_path)
+            try:
+                # 尝试从文件名解析类别
+                if 'ID' in filename:
+                    class_id_str = filename.split('ID')[1].split('_')[0]
+                    class_id = int(class_id_str) - 1
+                    all_image_paths.append(img_path)
+                    all_class_ids.append(class_id)
+            except:
+                # 如果解析失败，使用默认类别
+                all_image_paths.append(img_path)
+                all_class_ids.append(0)
+    
+    if not all_image_paths:
+        raise ValueError(f"在目录 {root_dir} 中没有找到任何图片文件")
+    
+    print(f"✅ 总共找到 {len(all_image_paths)} 张图片")
+    print(f"📊 类别分布: {len(set(all_class_ids))} 个不同类别")
+    
+    # 划分训练集和验证集
+    if len(set(all_class_ids)) > 1:
+        # 有多个类别，使用分层采样
+        try:
+            train_paths, val_paths, train_ids, val_ids = train_test_split(
+                all_image_paths, all_class_ids, 
+                test_size=val_split, 
+                random_state=42, 
+                stratify=all_class_ids
+            )
+        except:
+            # 如果分层采样失败，使用普通随机划分
+            train_paths, val_paths, train_ids, val_ids = train_test_split(
+                all_image_paths, all_class_ids, 
+                test_size=val_split, 
+                random_state=42
+            )
+    else:
+        # 只有一个类别，使用普通随机划分
+        train_paths, val_paths, train_ids, val_ids = train_test_split(
+            all_image_paths, all_class_ids, 
+            test_size=val_split, 
+            random_state=42
+        )
+    
+    print(f"📈 数据集划分完成:")
+    print(f"  训练集: {len(train_paths)} 张图片")
+    print(f"  验证集: {len(val_paths)} 张图片")
+    
+    # 创建数据集和数据加载器
+    train_dataset = SimpleGaitDataset(train_paths, train_ids, transform=transform)
+    val_dataset = SimpleGaitDataset(val_paths, val_ids, transform=transform)
+    
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        num_workers=min(num_workers, 2),  # 在Kaggle中限制workers数量
+        pin_memory=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=min(num_workers, 2),
+        pin_memory=True
+    )
+    
+    return train_loader, val_loader, len(train_dataset), len(val_dataset)
+
 class NormalizedVQVAEWrapper:
     """
     归一化VQ-VAE包装器
-    集成到LDM训练中使用
+    集成到LDM训练中使用，支持真实数据归一化统计量计算
     """
     
     def __init__(self, vqvae_config, normalization_method='standardize'):
@@ -57,18 +204,52 @@ class NormalizedVQVAEWrapper:
             normalization_method=normalization_method
         ).to(self.device)
         
-        # 尝试加载归一化统计量
-        norm_model_path = f"../VAE/normalized_vqvae_{normalization_method}.pth"
-        if os.path.exists(norm_model_path):
-            self.norm_vqvae.load_state_dict(torch.load(norm_model_path, map_location=self.device))
-            print(f"✅ 已加载归一化统计量: {norm_model_path}")
-        else:
-            print(f"⚠️ 未找到预计算的归一化统计量，将使用示例数据计算")
-            self._fit_normalization_stats()
+        # 归一化统计量将在实际数据上计算
+        self.is_fitted = False
+        self.normalization_method = normalization_method
+    
+    def fit_normalization_on_real_data(self, dataloader, max_samples=1000):
+        """在真实数据上计算归一化统计量"""
+        print("🔍 在真实数据集上计算归一化统计量...")
+        
+        self.vqvae.eval()
+        all_encodings = []
+        sample_count = 0
+        
+        with torch.no_grad():
+            for batch_idx, (images, _) in enumerate(dataloader):
+                if sample_count >= max_samples:
+                    break
+                    
+                images = images.to(self.device)
+                
+                # 获取编码器输出（VQ之前的连续表示）
+                z = self.vqvae.encoder(images)
+                all_encodings.append(z.cpu())
+                sample_count += images.size(0)
+                
+                if batch_idx % 10 == 0:
+                    print(f"  已处理 {sample_count} 个样本...")
+        
+        # 合并所有编码
+        all_encodings = torch.cat(all_encodings, dim=0)
+        
+        if self.norm_vqvae.normalization_method == 'standardize':
+            self.norm_vqvae.mean = all_encodings.mean()
+            self.norm_vqvae.std = all_encodings.std()
+            print(f"📊 真实数据标准化统计量: 均值={self.norm_vqvae.mean:.4f}, 标准差={self.norm_vqvae.std:.4f}")
+        elif self.norm_vqvae.normalization_method == 'minmax':
+            self.norm_vqvae.min_val = all_encodings.min()
+            self.norm_vqvae.max_val = all_encodings.max()
+            print(f"📊 真实数据Min-Max统计量: 范围=[{self.norm_vqvae.min_val:.4f}, {self.norm_vqvae.max_val:.4f}]")
+        
+        self.norm_vqvae.is_fitted = torch.tensor(True)
+        self.is_fitted = True
+        print("✅ 真实数据归一化统计量计算完成！")
     
     def _fit_normalization_stats(self):
-        """使用示例数据拟合归一化统计量"""
-        print("🔍 使用示例数据计算归一化统计量...")
+        """使用示例数据拟合归一化统计量（备用方法）"""
+        print("⚠️ 使用示例数据计算归一化统计量（建议使用真实数据）...")
         
         # 创建示例数据
         sample_batches = []
@@ -92,22 +273,30 @@ class NormalizedVQVAEWrapper:
         if self.norm_vqvae.normalization_method == 'standardize':
             self.norm_vqvae.mean = all_encodings.mean()
             self.norm_vqvae.std = all_encodings.std()
-            print(f"📊 标准化统计量: 均值={self.norm_vqvae.mean:.4f}, 标准差={self.norm_vqvae.std:.4f}")
+            print(f"📊 示例数据标准化统计量: 均值={self.norm_vqvae.mean:.4f}, 标准差={self.norm_vqvae.std:.4f}")
         elif self.norm_vqvae.normalization_method == 'minmax':
             self.norm_vqvae.min_val = all_encodings.min()
             self.norm_vqvae.max_val = all_encodings.max()
-            print(f"📊 Min-Max统计量: 范围=[{self.norm_vqvae.min_val:.4f}, {self.norm_vqvae.max_val:.4f}]")
+            print(f"📊 示例数据Min-Max统计量: 范围=[{self.norm_vqvae.min_val:.4f}, {self.norm_vqvae.max_val:.4f}]")
         
         self.norm_vqvae.is_fitted = torch.tensor(True)
-        print("✅ 归一化统计量计算完成！")
+        self.is_fitted = True
+        print("✅ 示例数据归一化统计量计算完成！")
     
     def encode_for_ldm(self, images):
         """编码图像用于LDM训练"""
+        if not self.is_fitted:
+            print("⚠️ 归一化统计量未计算，使用示例数据计算...")
+            self._fit_normalization_stats()
+        
         with torch.no_grad():
             return self.norm_vqvae.encode_without_vq(images)
     
     def decode_from_ldm(self, z_normalized):
         """从LDM生成的编码解码回图像"""
+        if not self.is_fitted:
+            raise RuntimeError("请先计算归一化统计量！")
+            
         with torch.no_grad():
             return self.norm_vqvae.decode_from_normalized(z_normalized)
 
@@ -376,26 +565,26 @@ def main():
     # 创建训练器
     trainer = LDMTrainer(config_path)
     
-    # 配置数据集路径 - 根据Kaggle环境调整
+    # 配置数据集路径 - 使用Kaggle适配的数据加载器
     print("🔍 配置数据集...")
     
-    # 添加VAE目录到路径以导入数据集模块
-    sys.path.append('../VAE')
-    from dataset import build_dataloader
-    
     try:
-        # 尝试加载数据集
-        train_loader, val_loader, train_dataset_len, val_dataset_len = build_dataloader(
+        # 使用Kaggle适配的数据加载器
+        train_loader, val_loader, train_dataset_len, val_dataset_len = build_kaggle_dataloader(
             root_dir=trainer.config['dataset']['root_dir'],
             batch_size=trainer.config['dataset']['batch_size'],
             num_workers=trainer.config['dataset']['num_workers'],
-            train_split=0.8
+            val_split=0.2  # 20%验证集，80%训练集
         )
         
         print(f"✅ 数据集加载成功:")
         print(f"  训练集: {train_dataset_len} 张图片")
         print(f"  验证集: {val_dataset_len} 张图片")
         print(f"  批次大小: {trainer.config['dataset']['batch_size']}")
+        
+        # 在真实数据上计算归一化统计量
+        print("🔧 在真实数据集上计算归一化统计量...")
+        trainer.vqvae_wrapper.fit_normalization_on_real_data(train_loader, max_samples=500)
         
         # 开始训练
         print("🚀 开始LDM训练...")
