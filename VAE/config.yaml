@@ -8,7 +8,7 @@ dataset:
 model:
   in_channels: 3
   latent_dim: 256
-  num_embeddings: 1024           # 从8192大幅降低到1024
+  num_embeddings: 256           # 从8192大幅降低到1024
   beta: 0.25             # 保持beta为0.25作为新码本大小的基准
   vq_ema_decay: 0.99     # 码本 EMA 更新衰减率
   groups: 32
