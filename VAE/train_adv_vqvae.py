@@ -154,11 +154,7 @@ def calculate_fid(model, val_loader, temp_real_dir, temp_gen_dir, sample_size=10
                 
                 # 通过模型获取重建图像
                 val_z = model.encoder(val_images)
-<<<<<<< HEAD
                 val_z_q, _, _ = model.vq(val_z)
-=======
-                val_z_q, _, _, _ = model.vq(val_z)  # 新增usage_info返回值
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
                 val_recons = model.decoder(val_z_q)
                 
                 # 反归一化
@@ -283,11 +279,7 @@ def calculate_fid_simple(model, val_loader, sample_size=1000):
                 
                 # 使用模型生成重建图像
                 z = model.encoder(val_images)
-<<<<<<< HEAD
                 z_q, _, _ = model.vq(z)
-=======
-                z_q, _, _, _ = model.vq(z)  # 新增usage_info返回值
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
                 recons = model.decoder(z_q)
                 
                 # 保存真实图像和生成图像用于FID计算
@@ -347,12 +339,7 @@ def calculate_fid_simple(model, val_loader, sample_size=1000):
 
 # 训练循环
 best_val_loss = float('inf') # 使用验证集损失来保存最佳模型
-<<<<<<< HEAD
 best_fid = float('inf')      # 使用FID评分来保存最佳模型
-=======
-best_val_rec_loss = float('inf') # 新增：使用验证集重建损失来保存最佳模型
-best_fid = float('inf') # 初始化最佳FID分数
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
 epochs = config['training']['epochs']
 disc_train_interval = config['training'].get('disc_train_interval', 5) # 判别器训练间隔
 
@@ -397,15 +384,6 @@ print(f"注意: vq_commit_weight 是 VQ commitment loss 中的 beta。总的 VQ 
 
 for epoch in range(epochs):
     model.train() # 设置为训练模式
-<<<<<<< HEAD
-=======
-    
-    # 在每个epoch开始时重置码本使用统计
-    if hasattr(model.vq, 'reset_usage_stats'):
-        model.vq.reset_usage_stats()
-        print(f"  已重置累积码本使用计数器。")
-    
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
     running_rec_loss = 0.0
     running_vq_commit_loss = 0.0 # VQ commitment loss (beta * ||E(x) - sg(z_q)||^2)
     running_vq_codebook_loss = 0.0 # VQ codebook loss (||sg(E(x)) - z_q||^2)
@@ -430,11 +408,7 @@ for epoch in range(epochs):
             
             with torch.no_grad(): # 生成器部分不计算梯度
                 z = model.encoder(images)
-<<<<<<< HEAD
                 z_q, _, _ = model.vq(z) 
-=======
-                z_q, _, _, _ = model.vq(z)  # 新增usage_info返回值
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
                 fake_images = model.decoder(z_q)
             
             real_preds = model.discriminator(images)
@@ -460,14 +434,8 @@ for epoch in range(epochs):
         # z_q_straight_through 是直通估计器的输出，用于解码器
         # vq_commit_loss_val 是 beta * ||E(x) - sg(z_q)||^2
         # vq_codebook_loss_val 是 ||sg(E(x)) - z_q||^2
-<<<<<<< HEAD
         z = model.encoder(images)
         z_q_straight_through, vq_commit_loss_val, vq_codebook_loss_val = model.vq(z)
-=======
-        # usage_info 是码本使用信息
-        z = model.encoder(images)
-        z_q_straight_through, vq_commit_loss_val, vq_codebook_loss_val, usage_info = model.vq(z)
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
         recons = model.decoder(z_q_straight_through)
         
         rec_loss = nn.MSELoss()(recons, images)
@@ -514,31 +482,11 @@ for epoch in range(epochs):
     else:
         epoch_disc_loss = 0.0
 
-<<<<<<< HEAD
     print(f"Epoch {epoch+1} Training Losses:")
     print(f"  Rec Loss: {epoch_rec_loss:.6f}, VQ Commit Loss: {epoch_vq_commit_loss:.6f}, VQ Codebook Loss: {epoch_vq_codebook_loss:.6f}")
     print(f"  Gen Adversarial Loss: {epoch_gen_adv_loss:.6f}, Perceptual Loss: {epoch_perc_loss:.6f}")
     print(f"  Disc Loss: {epoch_disc_loss:.6f} (trained on {disc_batches_trained} batches)")
 
-=======
-    # 获取码本使用统计
-    if hasattr(model.vq, 'get_usage_stats'):
-        usage_stats = model.vq.get_usage_stats()
-        usage_rate = usage_stats['usage_rate']
-        used_codes = usage_stats['used_codes']
-        total_codes = usage_stats['total_codes']
-    else:
-        usage_rate = 0.0
-        used_codes = 0
-        total_codes = config['model']['num_embeddings']
-
-    print(f"📊 Epoch {epoch+1} Training Summary:")
-    print(f"     Avg Gen Loss: {epoch_rec_loss + epoch_vq_commit_loss + epoch_vq_codebook_loss + epoch_gen_adv_loss + epoch_perc_loss:.4f}, Avg Disc Loss: {epoch_disc_loss:.4f}")
-    print(f"     Avg Rec Loss: {epoch_rec_loss:.4f}, Avg Perceptual Loss: {epoch_perc_loss:.4f}")
-    print(f"     Avg VQ Commit: {epoch_vq_commit_loss:.4f}, Avg VQ Codebook: {epoch_vq_codebook_loss:.4f}")
-    print(f"     📈 Cumulative Codebook Usage (end of epoch): {usage_rate:.2%}")
-    
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
     # --- 在验证集上评估 ---
     model.eval() # 设置为评估模式
     val_running_rec_loss = 0.0
@@ -551,11 +499,7 @@ for epoch in range(epochs):
             val_images = val_images.to(device)
             
             val_z = model.encoder(val_images)
-<<<<<<< HEAD
             val_z_q_st, val_vq_commit, val_vq_codebook = model.vq(val_z)
-=======
-            val_z_q_st, val_vq_commit, val_vq_codebook, val_usage_info = model.vq(val_z)  # 新增usage_info返回值
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
             val_recons = model.decoder(val_z_q_st)
             
             val_rec = nn.MSELoss()(val_recons, val_images)
@@ -579,7 +523,6 @@ for epoch in range(epochs):
                          val_l_reg + 
                          perceptual_weight * epoch_val_perc_loss)
 
-<<<<<<< HEAD
     print(f"Epoch {epoch+1} Validation Losses:")
     print(f"  Val Rec Loss: {epoch_val_rec_loss:.6f}, Val VQ Commit: {epoch_val_vq_commit_loss:.6f}, Val VQ Codebook: {epoch_val_vq_codebook_loss:.6f}")
     print(f"  Val Perceptual Loss: {epoch_val_perc_loss:.6f}")
@@ -597,53 +540,6 @@ for epoch in range(epochs):
             print(f"    → 之前最佳: {old_best:.6f} | 改善: {old_best - current_val_loss:.6f}")
     else:
         print(f"  ✗ 当前验证损失 {current_val_loss:.6f} 未改善 (当前最佳: {best_val_loss:.6f})")
-=======
-    print(f"📉 Epoch {epoch+1} Validation Summary - Combined Loss: {current_val_loss:.4f}")
-    print(f"     Avg Rec: {epoch_val_rec_loss:.4f}, Avg Perc: {epoch_val_perc_loss:.4f}")
-    print(f"     Avg VQ Commit: {epoch_val_vq_commit_loss:.4f}, Avg VQ Codebook: {epoch_val_vq_codebook_loss:.4f}")
-    print(f"     📊 当前累积码本使用率: {usage_rate:.2%} ({used_codes}/{total_codes} 码字)")
-
-    # 保存基于验证重建损失的最佳模型（主要策略）
-    if epoch_val_rec_loss < best_val_rec_loss:
-        old_best = best_val_rec_loss  # 保存旧的最佳值用于日志
-        best_val_rec_loss = epoch_val_rec_loss
-        
-        # 删除旧的模型文件（如果存在）
-        best_rec_model_path = os.path.join(save_dir, 'adv_vqvae_best_loss.pth')
-        if os.path.exists(best_rec_model_path):
-            try:
-                os.remove(best_rec_model_path)
-                print(f"  🗑️ 已删除旧的最佳重建损失模型")
-            except Exception as e:
-                print(f"  ⚠️ 删除旧模型时出错: {e}")
-        
-        # 保存新的最佳模型
-        torch.save(model.state_dict(), best_rec_model_path)
-        print(f"  ⭐ 发现更好的验证重建损失: {best_val_rec_loss:.6f}，已保存模型")
-        if epoch == 0:
-            print(f"    → 初始模型，设置为基准值")
-        else:
-            print(f"    → 之前最佳: {old_best:.6f} | 改善: {old_best - epoch_val_rec_loss:.6f}")
-    else:
-        print(f"  ✗ 当前验证重建损失 {epoch_val_rec_loss:.6f} 未改善 (当前最佳: {best_val_rec_loss:.6f})")
-    
-    # 可选：也保存基于综合损失的模型（用于对比）
-    if current_val_loss < best_val_loss:
-        best_val_loss = current_val_loss
-        
-        # 删除旧的综合损失模型文件（如果存在）
-        best_combined_model_path = os.path.join(save_dir, 'adv_vqvae_best_combined_loss.pth')
-        if os.path.exists(best_combined_model_path):
-            try:
-                os.remove(best_combined_model_path)
-                print(f"  🗑️ 已删除旧的最佳综合损失模型")
-            except Exception as e:
-                print(f"  ⚠️ 删除旧综合损失模型时出错: {e}")
-        
-        # 保存新的最佳综合损失模型
-        torch.save(model.state_dict(), best_combined_model_path)
-        print(f"  📊 综合损失最佳: {best_val_loss:.6f}，已保存对比模型")
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
     
     # 更新学习率调度器（epoch级）
     if use_scheduler:
@@ -668,30 +564,12 @@ for epoch in range(epochs):
                 if fid_score < best_fid:
                     old_best = best_fid  # 保存旧的最佳值用于日志
                     best_fid = fid_score
-<<<<<<< HEAD
-=======
-                    
-                    # 删除旧的FID模型文件（如果存在）
-                    best_fid_model_path = os.path.join(save_dir, 'adv_vqvae_best_fid.pth')
-                    if os.path.exists(best_fid_model_path):
-                        try:
-                            os.remove(best_fid_model_path)
-                            print(f"  🗑️ 已删除旧的最佳FID模型")
-                        except Exception as e:
-                            print(f"  ⚠️ 删除旧FID模型时出错: {e}")
-                    
-                    # 保存新的最佳FID模型
-                    torch.save(model.state_dict(), best_fid_model_path)
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
                     print(f"  ✓ 发现更好的FID评分: {best_fid:.4f}，已保存模型")
                     if epoch == 0:
                         print(f"    → 初始FID评估，设置为基准值")
                     else:
                         print(f"    → 之前最佳: {old_best:.4f} | 改善: {old_best - fid_score:.4f}")
-<<<<<<< HEAD
                     torch.save(model.state_dict(), os.path.join(save_dir, 'adv_vqvae_best_fid.pth'))
-=======
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
                 else:
                     print(f"  ✗ 当前FID评分 {fid_score:.4f} 未改善 (当前最佳: {best_fid:.4f})")
             except Exception as e:
@@ -707,10 +585,6 @@ for epoch in range(epochs):
             'gen_optimizer_state_dict': gen_optimizer.state_dict(),
             'disc_optimizer_state_dict': disc_optimizer.state_dict(),
             'best_val_loss': best_val_loss,
-<<<<<<< HEAD
-=======
-            'best_val_rec_loss': best_val_rec_loss,  # 新增
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
             'best_fid': best_fid if 'best_fid' in locals() else float('inf'),
         }, os.path.join(save_dir, f'adv_vqvae_epoch_{epoch+1}.pth'))
         print(f"  保存checkpoint: adv_vqvae_epoch_{epoch+1}.pth")
@@ -718,8 +592,4 @@ for epoch in range(epochs):
 print("训练完成！")
 # 删除临时文件目录
 if os.path.exists(temp_base_dir):
-<<<<<<< HEAD
     shutil.rmtree(temp_base_dir) 
-=======
-    shutil.rmtree(temp_base_dir) 
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
