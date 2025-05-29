@@ -1,7 +1,7 @@
 # 最简自编码器调试配置
 
 dataset:
-  root_dir: "/kaggle/input/dataset/dataset"   # 路径与主项目一致
+  root_dir: "/kaggle/input/dataset"   # 路径与主项目一致
   batch_size: 16
   num_workers: 4
 
