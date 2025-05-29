@@ -341,7 +341,7 @@ class PaperStandardUNet(nn.Module):
     def forward(self, x, timesteps, class_labels):
         """
         Args:
-            x: 潜在空间噪声图像 [B, 256, 16, 16]
+            x: 潜在空间噪声图像 [B, 256, 32, 32]
             timesteps: 时间步 [B]
             class_labels: 类别标签 [B]
         """
@@ -511,7 +511,7 @@ class PaperStandardCLDM(nn.Module):
         """生成样本"""
         if shape is None:
             batch_size = len(class_labels)
-            shape = (batch_size, 256, 16, 16)  # 根据VQ-VAE潜在空间
+            shape = (batch_size, 256, 32, 32)  # 更新：适配32×32×256潜在空间
         
         self.unet.eval()
         with torch.no_grad():
