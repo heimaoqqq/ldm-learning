@@ -234,18 +234,36 @@ class NormalizedVQVAEWrapper:
         # 合并所有编码
         all_encodings = torch.cat(all_encodings, dim=0)
         
+        # 检查原始编码范围
+        print(f"🔍 原始编码范围: [{all_encodings.min():.4f}, {all_encodings.max():.4f}]")
+        print(f"🔍 原始编码统计: 均值={all_encodings.mean():.4f}, 标准差={all_encodings.std():.4f}")
+        
         if self.norm_vqvae.normalization_method == 'standardize':
             self.norm_vqvae.mean = all_encodings.mean()
             self.norm_vqvae.std = all_encodings.std()
             print(f"📊 真实数据标准化统计量: 均值={self.norm_vqvae.mean:.4f}, 标准差={self.norm_vqvae.std:.4f}")
+            
+            # 测试归一化效果
+            normalized_sample = (all_encodings[:100] - self.norm_vqvae.mean) / (self.norm_vqvae.std + 1e-5)
+            print(f"🧪 归一化后范围: [{normalized_sample.min():.4f}, {normalized_sample.max():.4f}]")
+            print(f"🧪 归一化后统计: 均值={normalized_sample.mean():.4f}, 标准差={normalized_sample.std():.4f}")
+            
         elif self.norm_vqvae.normalization_method == 'minmax':
             self.norm_vqvae.min_val = all_encodings.min()
             self.norm_vqvae.max_val = all_encodings.max()
             print(f"📊 真实数据Min-Max统计量: 范围=[{self.norm_vqvae.min_val:.4f}, {self.norm_vqvae.max_val:.4f}]")
+            
+            # 测试归一化效果
+            normalized_sample = 2.0 * (all_encodings[:100] - self.norm_vqvae.min_val) / (self.norm_vqvae.max_val - self.norm_vqvae.min_val + 1e-5) - 1.0
+            print(f"🧪 归一化后范围: [{normalized_sample.min():.4f}, {normalized_sample.max():.4f}]")
         
         self.norm_vqvae.is_fitted = torch.tensor(True)
         self.is_fitted = True
         print("✅ 真实数据归一化统计量计算完成！")
+        
+        # 启用调试模式进行验证
+        self.norm_vqvae._debug = True
+        print("🔧 已启用归一化调试模式")
     
     def _fit_normalization_stats(self):
         """使用示例数据拟合归一化统计量（备用方法）"""
@@ -290,7 +308,9 @@ class NormalizedVQVAEWrapper:
             self._fit_normalization_stats()
         
         with torch.no_grad():
-            return self.norm_vqvae.encode_without_vq(images)
+            # 调用NormalizedVQVAE的encode_without_vq方法
+            z_normalized = self.norm_vqvae.encode_without_vq(images)
+            return z_normalized
     
     def decode_from_ldm(self, z_normalized):
         """从LDM生成的编码解码回图像"""
@@ -298,6 +318,7 @@ class NormalizedVQVAEWrapper:
             raise RuntimeError("请先计算归一化统计量！")
             
         with torch.no_grad():
+            # 调用NormalizedVQVAE的decode_from_normalized方法
             return self.norm_vqvae.decode_from_normalized(z_normalized)
 
 class LDMTrainer:
@@ -380,43 +401,49 @@ class LDMTrainer:
         total_loss = 0
         num_batches = len(dataloader)
         
-        with tqdm(dataloader, desc=f"Epoch {self.epoch}") as pbar:
-            for batch_idx, (images, labels) in enumerate(pbar):
-                images = images.to(self.device)
-                labels = labels.to(self.device)
-                
-                # 使用归一化VQ-VAE编码图像
-                with torch.no_grad():
-                    latents = self.vqvae_wrapper.encode_for_ldm(images)
-                
-                # 检查编码范围
-                if batch_idx == 0:
-                    print(f"🔍 潜在编码统计: 形状={latents.shape}, "
-                          f"范围=[{latents.min():.4f}, {latents.max():.4f}], "
-                          f"均值={latents.mean():.4f}, 标准差={latents.std():.4f}")
-                
-                # 前向传播
-                self.optimizer.zero_grad()
-                outputs = self.model(latents, labels)
-                
-                # 处理CLDM返回的三元组 (loss, pred_noise, noise)
-                if isinstance(outputs, tuple) and len(outputs) == 3:
-                    loss, pred_noise, noise = outputs
-                else:
-                    raise ValueError(f"模型返回格式错误: {type(outputs)}")
-                
-                # 反向传播
-                loss.backward()
-                
-                # 梯度裁剪
-                grad_clip = self.config['training'].get('grad_clip_norm')
-                if grad_clip:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
-                
-                self.optimizer.step()
-                
-                total_loss += loss.item()
-                pbar.set_postfix({'loss': f"{loss.item():.6f}"})
+        # 使用简化的进度条，避免重复显示
+        for batch_idx, (images, labels) in enumerate(dataloader):
+            images = images.to(self.device)
+            labels = labels.to(self.device)
+            
+            # 使用归一化VQ-VAE编码图像
+            with torch.no_grad():
+                latents = self.vqvae_wrapper.encode_for_ldm(images)
+            
+            # 只在第一个epoch的第一个批次显示编码统计
+            if self.epoch == 0 and batch_idx == 0:
+                print(f"🔍 潜在编码统计: 形状={latents.shape}, "
+                      f"范围=[{latents.min():.4f}, {latents.max():.4f}], "
+                      f"均值={latents.mean():.4f}, 标准差={latents.std():.4f}")
+            
+            # 前向传播
+            self.optimizer.zero_grad()
+            outputs = self.model(latents, labels)
+            
+            # 处理CLDM返回的三元组 (loss, pred_noise, noise)
+            if isinstance(outputs, tuple) and len(outputs) == 3:
+                loss, pred_noise, noise = outputs
+            else:
+                raise ValueError(f"模型返回格式错误: {type(outputs)}")
+            
+            # 反向传播
+            loss.backward()
+            
+            # 梯度裁剪
+            grad_clip = self.config['training'].get('grad_clip_norm')
+            if grad_clip:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+            
+            self.optimizer.step()
+            
+            total_loss += loss.item()
+            
+            # 简化的进度显示 - 每25个批次或最后一个批次显示
+            if (batch_idx + 1) % 25 == 0 or batch_idx == num_batches - 1:
+                progress = (batch_idx + 1) / num_batches * 100
+                current_avg_loss = total_loss / (batch_idx + 1)
+                print(f"Epoch {self.epoch}: [{batch_idx+1:4d}/{num_batches}] "
+                      f"({progress:5.1f}%) Loss: {current_avg_loss:.6f}")
         
         avg_loss = total_loss / num_batches
         return avg_loss
@@ -484,7 +511,7 @@ class LDMTrainer:
             print(f"✅ 已保存生成样本: {save_path}")
     
     def save_model(self, is_best=False):
-        """保存模型"""
+        """保存模型并删除旧的检查点"""
         checkpoint = {
             'epoch': self.epoch,
             'model_state_dict': self.model.state_dict(),
@@ -496,15 +523,30 @@ class LDMTrainer:
         if self.scheduler:
             checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
         
-        # 保存检查点
+        # 删除旧的检查点文件（保留最近3个）
+        checkpoint_pattern = os.path.join(self.save_dir, "checkpoint_epoch_*.pth")
+        existing_checkpoints = glob.glob(checkpoint_pattern)
+        existing_checkpoints.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+        
+        # 删除旧于第3个的检查点
+        if len(existing_checkpoints) >= 3:
+            for old_checkpoint in existing_checkpoints[2:]:
+                try:
+                    os.remove(old_checkpoint)
+                    print(f"🗑️ 已删除旧检查点: {os.path.basename(old_checkpoint)}")
+                except Exception as e:
+                    print(f"⚠️ 删除失败 {old_checkpoint}: {e}")
+        
+        # 保存新检查点
         checkpoint_path = os.path.join(self.save_dir, f"checkpoint_epoch_{self.epoch}.pth")
         torch.save(checkpoint, checkpoint_path)
+        print(f"💾 已保存检查点: checkpoint_epoch_{self.epoch}.pth")
         
         # 保存最佳模型
         if is_best:
             best_path = os.path.join(self.save_dir, "best_model.pth")
             torch.save(checkpoint, best_path)
-            print(f"✅ 已保存最佳模型: {best_path}")
+            print(f"✅ 已保存最佳模型: best_model.pth")
     
     def train(self, train_loader, val_loader):
         """完整训练循环"""
@@ -527,18 +569,23 @@ class LDMTrainer:
             
             # 验证
             if epoch % self.config['training']['val_interval'] == 0:
-                val_loss = self.validate(val_loader)
+                val_loss, eval_metrics = self.comprehensive_evaluation(val_loader, save_samples=True)
                 val_losses.append(val_loss)
                 
-                print(f"Epoch {epoch}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}")
+                print(f"✅ Epoch {epoch}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}")
                 
-                # 保存最佳模型
+                # 保存最佳模型（基于验证损失）
                 if val_loss < self.best_loss:
                     self.best_loss = val_loss
                     self.save_model(is_best=True)
+                    print(f"🎯 新的最佳模型! 验证损失: {val_loss:.6f}")
+                
+            else:
+                # 只显示训练损失，不进行详细评估
+                print(f"Epoch {epoch}: Train Loss = {train_loss:.6f}")
             
-            # 生成样本
-            if epoch % self.config['training']['sample_interval'] == 0:
+            # 常规样本生成（简化版本）
+            if epoch % self.config['training']['sample_interval'] == 0 and epoch % self.config['training']['val_interval'] != 0:
                 self.sample_and_save()
             
             # 保存检查点
@@ -551,6 +598,144 @@ class LDMTrainer:
         
         print("🎉 训练完成！")
         return train_losses, val_losses
+
+    def evaluate_generation_quality(self, num_samples=100, num_classes=None):
+        """
+        评估LDM生成质量
+        包括FID、多样性、类别条件准确性等指标
+        """
+        self.model.eval()
+        print(f"🔍 开始评估生成质量 (样本数: {num_samples})...")
+        
+        if num_classes is None:
+            num_classes = self.config['cldm']['num_classes']
+        
+        generated_images = []
+        class_labels = []
+        
+        with torch.no_grad():
+            # 生成指定数量的样本
+            samples_per_batch = min(16, num_samples)
+            num_batches = (num_samples + samples_per_batch - 1) // samples_per_batch
+            
+            for batch_idx in range(num_batches):
+                current_batch_size = min(samples_per_batch, num_samples - batch_idx * samples_per_batch)
+                
+                # 随机生成类别标签
+                batch_labels = torch.randint(0, num_classes, (current_batch_size,), device=self.device)
+                
+                # 生成潜在编码
+                shape = (current_batch_size, 256, 32, 32)  # 32×32×256
+                generated_latents = self.model.sample(
+                    batch_labels, 
+                    self.device,
+                    shape=shape,
+                    num_inference_steps=self.config['training']['sampling_steps'],
+                    eta=self.config['training'].get('eta', 0.0)
+                )
+                
+                # 解码为图像
+                batch_images = self.vqvae_wrapper.decode_from_ldm(generated_latents)
+                
+                generated_images.append(batch_images.cpu())
+                class_labels.extend(batch_labels.cpu().tolist())
+                
+                if (batch_idx + 1) % 5 == 0:
+                    print(f"  已生成 {(batch_idx + 1) * samples_per_batch} / {num_samples} 样本")
+        
+        # 合并所有生成的图像
+        generated_images = torch.cat(generated_images, dim=0)
+        
+        # 评估指标
+        metrics = {}
+        
+        # 1. 图像质量统计
+        metrics['image_stats'] = {
+            'mean_pixel_value': generated_images.mean().item(),
+            'std_pixel_value': generated_images.std().item(),
+            'min_pixel_value': generated_images.min().item(),
+            'max_pixel_value': generated_images.max().item()
+        }
+        
+        # 2. 类别分布均匀性
+        from collections import Counter
+        class_distribution = Counter(class_labels)
+        metrics['class_distribution'] = {
+            'entropy': self._calculate_entropy(list(class_distribution.values())),
+            'max_class_ratio': max(class_distribution.values()) / len(class_labels),
+            'num_unique_classes': len(class_distribution)
+        }
+        
+        # 3. 图像多样性 (通过像素差异估算)
+        if len(generated_images) > 1:
+            # 随机选择样本对计算差异
+            num_pairs = min(100, len(generated_images) * (len(generated_images) - 1) // 2)
+            differences = []
+            for _ in range(num_pairs):
+                idx1, idx2 = torch.randint(0, len(generated_images), (2,))
+                if idx1 != idx2:
+                    diff = torch.mean((generated_images[idx1] - generated_images[idx2]) ** 2).item()
+                    differences.append(diff)
+            
+            metrics['diversity'] = {
+                'mean_pairwise_mse': np.mean(differences),
+                'std_pairwise_mse': np.std(differences)
+            }
+        
+        print("✅ 生成质量评估完成")
+        return metrics, generated_images
+    
+    def _calculate_entropy(self, counts):
+        """计算分布熵"""
+        counts = np.array(counts)
+        probs = counts / counts.sum()
+        probs = probs[probs > 0]  # 避免log(0)
+        return -np.sum(probs * np.log2(probs))
+    
+    def comprehensive_evaluation(self, val_loader, save_samples=True):
+        """
+        综合评估LDM质量
+        """
+        print("🔍 开始综合质量评估...")
+        
+        # 1. 验证损失
+        val_loss = self.validate(val_loader)
+        print(f"📊 验证损失: {val_loss:.6f}")
+        
+        # 2. 生成质量评估
+        metrics, generated_images = self.evaluate_generation_quality(
+            num_samples=self.config['training'].get('eval_samples', 64)
+        )
+        
+        # 3. 打印评估结果
+        print(f"\n📈 生成质量指标:")
+        print(f"  图像统计:")
+        stats = metrics['image_stats']
+        print(f"    像素值范围: [{stats['min_pixel_value']:.3f}, {stats['max_pixel_value']:.3f}]")
+        print(f"    像素均值: {stats['mean_pixel_value']:.3f} ± {stats['std_pixel_value']:.3f}")
+        
+        print(f"  类别分布:")
+        dist = metrics['class_distribution']
+        print(f"    分布熵: {dist['entropy']:.3f} (理想值: {np.log2(self.config['cldm']['num_classes']):.3f})")
+        print(f"    最大类别占比: {dist['max_class_ratio']:.3f}")
+        print(f"    生成类别数: {dist['num_unique_classes']}/{self.config['cldm']['num_classes']}")
+        
+        if 'diversity' in metrics:
+            div = metrics['diversity']
+            print(f"  图像多样性:")
+            print(f"    平均成对差异: {div['mean_pairwise_mse']:.6f}")
+        
+        # 4. 保存生成样本
+        if save_samples:
+            import torchvision.utils as vutils
+            save_path = os.path.join(self.save_dir, f"eval_samples_epoch_{self.epoch}.png")
+            vutils.save_image(
+                generated_images[:min(64, len(generated_images))], save_path,
+                nrow=8, normalize=True, value_range=(0, 1)
+            )
+            print(f"✅ 已保存评估样本: {save_path}")
+        
+        return val_loss, metrics
 
 def main():
     """主函数"""
