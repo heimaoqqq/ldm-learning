@@ -79,12 +79,17 @@ def analyze_codebook_usage():
                     
                 images = images.to(device)
                 z = model.encoder(images)
-                _, _, _, usage_info = model.vq(z)
                 
-                if 'encoding_indices' in usage_info:
-                    indices = usage_info['encoding_indices'].cpu().numpy()
-                    all_indices.extend(indices.flatten())
-                    sample_count += images.size(0)
+                # 直接计算编码索引，不依赖于usage_info
+                z_flattened = z.permute(0,2,3,1).contiguous().view(-1, model.vq.embedding_dim)
+                dist = (z_flattened.pow(2).sum(1, keepdim=True)
+                        - 2 * torch.matmul(z_flattened, model.vq.embedding.weight.t())
+                        + model.vq.embedding.weight.pow(2).sum(1))
+                encoding_indices = torch.argmin(dist, dim=1)
+                
+                indices = encoding_indices.cpu().numpy()
+                all_indices.extend(indices.flatten())
+                sample_count += images.size(0)
             
             # 分析验证集
             val_sample_count = 0
@@ -94,13 +99,23 @@ def analyze_codebook_usage():
                     
                 images = images.to(device)
                 z = model.encoder(images)
-                _, _, _, usage_info = model.vq(z)
                 
-                if 'encoding_indices' in usage_info:
-                    indices = usage_info['encoding_indices'].cpu().numpy()
-                    all_indices.extend(indices.flatten())
-                    val_sample_count += images.size(0)
+                # 直接计算编码索引
+                z_flattened = z.permute(0,2,3,1).contiguous().view(-1, model.vq.embedding_dim)
+                dist = (z_flattened.pow(2).sum(1, keepdim=True)
+                        - 2 * torch.matmul(z_flattened, model.vq.embedding.weight.t())
+                        + model.vq.embedding.weight.pow(2).sum(1))
+                encoding_indices = torch.argmin(dist, dim=1)
+                
+                indices = encoding_indices.cpu().numpy()
+                all_indices.extend(indices.flatten())
+                val_sample_count += images.size(0)
         
+        # 检查是否收集到了索引
+        if len(all_indices) == 0:
+            print("❌ 未能收集到任何编码索引，跳过此模型")
+            continue
+            
         # 统计分析
         print(f"📈 总共分析了 {len(all_indices)} 个编码")
         
@@ -132,6 +147,12 @@ def analyze_codebook_usage():
         
         # 统计分布分析
         counts_array = np.array(list(usage_counts.values()))
+        
+        # 检查counts_array是否为空
+        if len(counts_array) == 0:
+            print(f"\n⚠️ 警告: 没有收集到码字使用统计，跳过统计分析")
+            continue
+            
         print(f"\n📈 使用分布统计:")
         print(f"  平均使用次数: {counts_array.mean():.2f}")
         print(f"  使用次数标准差: {counts_array.std():.2f}")
