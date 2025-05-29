@@ -39,7 +39,8 @@ class PaperEncoder(nn.Module):
         self.down2 = nn.Conv2d(128, 128, 3, 2, 1)  # 32x32
         
         self.res3 = ResidualBlock(128, 256, groups)
-        self.down3 = nn.Conv2d(256, 256, 3, 2, 1)  # 16x16
+        # 移除 down3，保持在 32x32 分辨率
+        # self.down3 = nn.Conv2d(256, 256, 3, 2, 1)  # 16x16 <- 移除这行
         
         self.res4 = ResidualBlock(256, latent_dim, groups)
     
@@ -50,7 +51,7 @@ class PaperEncoder(nn.Module):
         x = self.res2(x)
         x = self.down2(x)
         x = self.res3(x)
-        x = self.down3(x)
+        # x = self.down3(x)  # 移除这行，保持32x32
         x = self.res4(x)
         return x
 
@@ -60,42 +61,43 @@ class PaperDecoder(nn.Module):
         super().__init__()
         self.res1 = ResidualBlock(latent_dim, 256, groups)
         
-        # 使用双线性上采样+卷积替代转置卷积
-        self.up1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.conv1 = nn.Conv2d(256, 256, 3, 1, 1)
-        self.gn1 = nn.GroupNorm(groups, 256)
+        # 从32x32开始，移除第一个上采样，直接处理32x32输入
+        # self.up1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)  # 移除
+        # self.conv1 = nn.Conv2d(256, 256, 3, 1, 1)  # 移除
+        # self.gn1 = nn.GroupNorm(groups, 256)  # 移除
         
         self.res2 = ResidualBlock(256, 128, groups)
-        self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)  # 32->64
         self.conv2 = nn.Conv2d(128, 128, 3, 1, 1)
         self.gn2 = nn.GroupNorm(groups, 128)
         
         self.res3 = ResidualBlock(128, 64, groups)
-        self.up3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.up3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)  # 64->128
         self.conv3 = nn.Conv2d(64, 64, 3, 1, 1)
         self.gn3 = nn.GroupNorm(groups, 64)
         
         self.res4 = ResidualBlock(64, 32, groups)
-        self.up4 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.up4 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)  # 128->256
         self.conv4 = nn.Conv2d(32, out_channels, 3, 1, 1)
         self.relu = nn.ReLU(inplace=True)
     
     def forward(self, x):
         x = self.res1(x)
         
-        x = self.up1(x)
-        x = self.relu(self.gn1(self.conv1(x)))
+        # 移除第一个上采样步骤，直接从32x32开始
+        # x = self.up1(x)
+        # x = self.relu(self.gn1(self.conv1(x)))
         
         x = self.res2(x)
-        x = self.up2(x)
+        x = self.up2(x)  # 32->64
         x = self.relu(self.gn2(self.conv2(x)))
         
         x = self.res3(x)
-        x = self.up3(x)
+        x = self.up3(x)  # 64->128
         x = self.relu(self.gn3(self.conv3(x)))
         
         x = self.res4(x)
-        x = self.up4(x)
+        x = self.up4(x)  # 128->256
         x = self.conv4(x)
         
         return torch.tanh(x)
@@ -113,48 +115,27 @@ class VectorQuantizer(nn.Module):
         # 注册 EMA 相关缓冲区
         self.register_buffer('cluster_size', torch.zeros(num_embeddings))
         self.register_buffer('embedding_avg', self.embedding.weight.data.clone())
-        # 新增：用于跟踪整个epoch的累积码本使用情况
-        self.register_buffer('cumulative_usage_vector', torch.zeros(num_embeddings))
-        self._is_first_batch_in_epoch = True # 辅助判断是否是epoch的第一个batch
         
-    def reset_cumulative_usage(self):
-        """在每个epoch开始时调用，重置累积使用计数器"""
-        self.cumulative_usage_vector.fill_(0)
-        self._is_first_batch_in_epoch = True
-
     def forward(self, z):
-        # 在epoch的第一个batch（非严格意义，但用于近似重置）重置累积使用
-        # 更稳健的做法是在训练循环的epoch开始处调用reset_cumulative_usage
-        if self.training and self._is_first_batch_in_epoch:
-             # self.reset_cumulative_usage() # 实际重置应由外部训练循环控制
-             self._is_first_batch_in_epoch = False
-
         z_flattened = z.permute(0,2,3,1).contiguous().view(-1, self.embedding_dim)
-        dist = (z_flattened.pow(2).sum(1, keepdim=True) -
-                2 * torch.matmul(z_flattened, self.embedding.weight.t()) +
-                self.embedding.weight.pow(2).sum(1))
+        dist = (z_flattened.pow(2).sum(1, keepdim=True)
+                - 2 * torch.matmul(z_flattened, self.embedding.weight.t())
+                + self.embedding.weight.pow(2).sum(1))
         encoding_indices = torch.argmin(dist, dim=1)
         
-        batch_usage_percent = 0.0
-        cumulative_epoch_usage_percent = 0.0
-
+        # 计算编码本使用率 (codebook usage)
         if self.training:
             with torch.no_grad():
-                # 当前批次的码本使用情况
-                batch_active_indices = encoding_indices.unique()
-                batch_usage_percent = batch_active_indices.numel() / self.num_embeddings
-                
-                # 更新整个epoch的累积码本使用情况
-                self.cumulative_usage_vector.scatter_add_(0, batch_active_indices, torch.ones_like(batch_active_indices, dtype=self.cumulative_usage_vector.dtype))
-                cumulative_epoch_usage_percent = (self.cumulative_usage_vector > 0).float().sum() / self.num_embeddings
+                usage = torch.zeros(self.num_embeddings, device=z.device)
+                ones = torch.ones(encoding_indices.shape[0], device=z.device)
+                usage.index_add_(0, encoding_indices, ones)
+                usage = (usage > 0).float().sum() / self.num_embeddings
+                # 在实际训练中可以将此指标记录到tensorboard
         
         # 获取量化后的嵌入向量
         quantized_embeddings = self.embedding(encoding_indices)  # [N, D]
-        # quantized = quantized_embeddings.view_as(z) # view_as(z) 可能在 z 的形状与预期不符时出错
-        # 改为使用 z.shape 来确保形状一致
-        quantized = quantized_embeddings.view(z.shape)
-
-
+        quantized = quantized_embeddings.view(z.shape)  # [B, D, H, W]
+        
         # 计算 Codebook loss: ||sg(E(x)) - z_q||^2_2
         codebook_loss = F.mse_loss(quantized_embeddings, z_flattened.detach())
         
@@ -182,8 +163,7 @@ class VectorQuantizer(nn.Module):
         
         # 直通估计器 (Straight-Through Estimator)
         quantized_straight_through = z + (quantized - z).detach()
-        # 返回新增的使用率指标
-        return quantized_straight_through, commitment_loss, codebook_loss, batch_usage_percent, cumulative_epoch_usage_percent
+        return quantized_straight_through, commitment_loss, codebook_loss
 
 # 新增：Patch-based Discriminator（来自论文描述）
 class PatchDiscriminator(nn.Module):
@@ -245,11 +225,10 @@ class AdvVQVAE(nn.Module):
         self.discriminator = PatchDiscriminator(in_channels, disc_ndf)
     
     def encode(self, x):
-        """编码函数，返回量化后的潜在表示和使用率（如果需要）"""
+        """编码函数，返回量化后的潜在表示"""
         z = self.encoder(x)
-        # 修改vq的调用以接收新的返回值
-        z_q, _, _, batch_usage, epoch_usage = self.vq(z) 
-        return z_q # 通常encode只关心z_q，使用率在forward中处理
+        z_q, _, _ = self.vq(z)
+        return z_q
     
     def decode(self, z_q):
         """解码函数，从潜在表示重建图像"""
@@ -257,11 +236,9 @@ class AdvVQVAE(nn.Module):
     
     def forward(self, x):
         z = self.encoder(x)
-        # 修改vq的调用以接收新的返回值
-        z_q_straight_through, commitment_loss, codebook_loss, batch_usage, cumulative_usage = self.vq(z)
+        z_q_straight_through, commitment_loss, codebook_loss = self.vq(z)
         x_recon = self.decoder(z_q_straight_through)
-        # 返回新增的使用率指标
-        return x_recon, commitment_loss, codebook_loss, batch_usage, cumulative_usage
+        return x_recon, commitment_loss, codebook_loss
     
     def calculate_losses(self, x, rec_weight=1.0, perceptual_weight=0.1):
         """
@@ -270,8 +247,7 @@ class AdvVQVAE(nn.Module):
         这个方法在训练脚本中被覆盖了，主要参考训练脚本中的损失计算逻辑
         """
         # 获取重建结果和VQ损失
-        # 修改forward的调用以接收新的返回值
-        x_recon, commitment_loss, codebook_loss, _, _ = self.forward(x) # _ placeholder for usage metrics if not used here
+        x_recon, commitment_loss, codebook_loss = self.forward(x)
         
         # 重建损失（MSE）
         rec_loss = F.mse_loss(x_recon, x)
@@ -303,9 +279,7 @@ class AdvVQVAE(nn.Module):
             'rec_loss': rec_loss,
             'vq_commitment_loss': commitment_loss,
             'vq_codebook_loss': codebook_loss,
-            'gen_loss': gen_loss,
-            'batch_usage': batch_usage,
-            'cumulative_usage': cumulative_usage
+            'gen_loss': gen_loss
         }
     
     def train_step(self, x, gen_optimizer, disc_optimizer, train_disc=True, train_gen=True):
@@ -339,7 +313,7 @@ if __name__ == "__main__":
     disc_optimizer = optim.Adam(model.discriminator.parameters(), lr=1e-4)
     
     # 测试前向传播
-    recon, commit_loss, codebook_loss, batch_usage, cumulative_usage = model(x)
+    recon, commit_loss, codebook_loss = model(x)
     print(f"Input shape: {x.shape}")
     print(f"Output shape: {recon.shape}")
     print(f"VQ commitment loss: {commit_loss.item()}")
