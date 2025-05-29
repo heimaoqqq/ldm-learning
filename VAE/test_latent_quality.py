@@ -62,7 +62,7 @@ def test_latent_space_quality():
         
         # 编码和重建
         z = model.encoder(images)
-        z_q, _, _ = model.vq(z)
+        z_q, _, _, _ = model.vq(z)  # VQ层返回4个值：quantized, commitment_loss, codebook_loss, usage_info
         recons = model.decoder(z_q)
         
         # 计算重建指标
@@ -103,7 +103,7 @@ def test_latent_space_quality():
             z_interp = (1 - alpha) * z1 + alpha * z2
             
             # VQ量化
-            z_q_interp, _, _ = model.vq(z_interp)
+            z_q_interp, _, _, _ = model.vq(z_interp)  # 修复这里也需要4个值
             
             # 解码
             recon_interp = model.decoder(z_q_interp)
