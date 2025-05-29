@@ -339,7 +339,8 @@ def calculate_fid_simple(model, val_loader, sample_size=1000):
 
 # 训练循环
 best_val_loss = float('inf') # 使用验证集损失来保存最佳模型
-best_fid = float('inf')      # 使用FID评分来保存最佳模型
+best_val_rec_loss = float('inf') # 新增：使用验证集重建损失来保存最佳模型
+best_fid = float('inf') # 初始化最佳FID分数
 epochs = config['training']['epochs']
 disc_train_interval = config['training'].get('disc_train_interval', 5) # 判别器训练间隔
 
@@ -526,20 +527,26 @@ for epoch in range(epochs):
     print(f"Epoch {epoch+1} Validation Losses:")
     print(f"  Val Rec Loss: {epoch_val_rec_loss:.6f}, Val VQ Commit: {epoch_val_vq_commit_loss:.6f}, Val VQ Codebook: {epoch_val_vq_codebook_loss:.6f}")
     print(f"  Val Perceptual Loss: {epoch_val_perc_loss:.6f}")
-    print(f"  Current Combined Val Loss (for saving): {current_val_loss:.6f}")
+    print(f"  Current Combined Val Loss: {current_val_loss:.6f}")
 
-    # 保存基于验证损失的最佳模型
-    if current_val_loss < best_val_loss:
-        old_best = best_val_loss  # 保存旧的最佳值用于日志
-        best_val_loss = current_val_loss
+    # 保存基于验证重建损失的最佳模型（主要策略）
+    if epoch_val_rec_loss < best_val_rec_loss:
+        old_best = best_val_rec_loss  # 保存旧的最佳值用于日志
+        best_val_rec_loss = epoch_val_rec_loss
         torch.save(model.state_dict(), os.path.join(save_dir, 'adv_vqvae_best_loss.pth'))
-        print(f"  ✓ 发现更好的验证损失: {best_val_loss:.6f}，已保存模型")
+        print(f"  ⭐ 发现更好的验证重建损失: {best_val_rec_loss:.6f}，已保存模型")
         if epoch == 0:
             print(f"    → 初始模型，设置为基准值")
         else:
-            print(f"    → 之前最佳: {old_best:.6f} | 改善: {old_best - current_val_loss:.6f}")
+            print(f"    → 之前最佳: {old_best:.6f} | 改善: {old_best - epoch_val_rec_loss:.6f}")
     else:
-        print(f"  ✗ 当前验证损失 {current_val_loss:.6f} 未改善 (当前最佳: {best_val_loss:.6f})")
+        print(f"  ✗ 当前验证重建损失 {epoch_val_rec_loss:.6f} 未改善 (当前最佳: {best_val_rec_loss:.6f})")
+    
+    # 可选：也保存基于综合损失的模型（用于对比）
+    if current_val_loss < best_val_loss:
+        best_val_loss = current_val_loss
+        torch.save(model.state_dict(), os.path.join(save_dir, 'adv_vqvae_best_combined_loss.pth'))
+        print(f"  📊 综合损失最佳: {best_val_loss:.6f}，已保存对比模型")
     
     # 更新学习率调度器（epoch级）
     if use_scheduler:
@@ -585,6 +592,7 @@ for epoch in range(epochs):
             'gen_optimizer_state_dict': gen_optimizer.state_dict(),
             'disc_optimizer_state_dict': disc_optimizer.state_dict(),
             'best_val_loss': best_val_loss,
+            'best_val_rec_loss': best_val_rec_loss,  # 新增
             'best_fid': best_fid if 'best_fid' in locals() else float('inf'),
         }, os.path.join(save_dir, f'adv_vqvae_epoch_{epoch+1}.pth'))
         print(f"  保存checkpoint: adv_vqvae_epoch_{epoch+1}.pth")
