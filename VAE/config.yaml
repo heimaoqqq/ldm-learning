@@ -1,11 +1,7 @@
 # 最简自编码器调试配置
 
 dataset:
-<<<<<<< HEAD
   root_dir: "/kaggle/input/dataset/dataset"   # 路径与主项目一致
-=======
-  root_dir: "/kaggle/input/dataset"   # 路径与主项目一致
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
   batch_size: 16
   num_workers: 4
 
@@ -20,12 +16,8 @@ model:
 training:
   epochs: 100
   lr: 0.0001
-<<<<<<< HEAD
   weight_decay: 0.00001
-=======
-  weight_decay: 0.00002          # 从0.00001增加到0.00005，增强正则化
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
-  save_dir: "ae_debug_models"
+  save_dir: "vae_models"
   rec_weight: 1.0          # 恢复原始重建损失权重
   vq_commit_weight: 0.25    # 降低VQ损失权重（从1.0到0.25）
   perceptual_weight: 0.1   
@@ -36,8 +28,4 @@ training:
   fid_sample_size: 1000    # 用于计算FID的样本数量
   fid_batch_size: 32       # FID计算的批量大小 
   warmup_epochs: 10        # 线性预热的轮数(总轮数的10%)
-<<<<<<< HEAD
   use_scheduler: true      # 是否使用学习率调度器 
-=======
-  use_scheduler: true      # 是否使用学习率调度器 
->>>>>>> 126d4ad24fc08805125e6779329dd8caece6ed5d
