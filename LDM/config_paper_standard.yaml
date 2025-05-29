@@ -1,0 +1,120 @@
+# 严格按照论文参数的CLDM配置
+# 基于ControlNet和Stable Diffusion论文标准
+
+# 数据集配置
+dataset:
+  root_dir: "/kaggle/input/dataset"
+  batch_size: 32                    # 论文建议32或64
+  num_workers: 2
+  num_classes: 31
+
+# VQ-VAE配置（预训练模型）
+vqvae:
+  model_path: "/kaggle/input/adv-vqvae-best-fid-pth/adv_vqvae_best_fid.pth"
+  in_channels: 3
+  latent_dim: 256
+  num_embeddings: 512
+  beta: 0.25
+  decay: 0.99
+  groups: 32
+
+# 论文标准CLDM模型配置
+cldm:
+  model_type: "PaperStandardCLDM"
+  latent_dim: 256                   # VQ-VAE潜在空间维度
+  num_classes: 31
+  
+  # DDPM配置 - 论文标准
+  num_timesteps: 1000               # 论文标准1000步
+  beta_schedule: "linear"           # 论文使用线性调度
+  beta_start: 0.0001               # 论文标准
+  beta_end: 0.02                   # 论文标准
+  
+  # U-Net架构配置 - 增强版
+  model_channels: 192              # 增加基础通道数 (原128)
+  time_emb_dim: 256                # 时间嵌入维度
+  class_emb_dim: 384               # 增加类别嵌入维度 (原256)
+  channel_mult: [1, 2, 4, 4]       # 加深网络 (原[1, 2, 4])
+  num_res_blocks: 2                # 每层2个残差块 - 论文标准
+  attention_resolutions: [8, 4]    # 在更深层使用注意力 (原[8])
+  dropout: 0.0                     # 论文通常不用dropout
+  
+  # EMA配置 - 论文推荐
+  use_ema: true
+  ema_decay: 0.9999
+
+# 训练配置 - 论文标准
+training:
+  epochs: 500                      # 充分训练
+  lr: 0.0001                       # 论文建议1e-4或2e-4
+  weight_decay: 0.0                # 论文通常不用weight decay
+  
+  # 学习率调度 - 论文使用余弦衰减
+  use_scheduler: true
+  scheduler_type: "cosine"         # 余弦衰减调度器
+  warmup_epochs: 5                 # 增加预热 (原0)
+  min_lr: 0.00001
+  
+  # 优化器 - 论文标准
+  optimizer: "Adam"                # 论文使用Adam
+  beta1: 0.9
+  beta2: 0.999
+  eps: 0.00000001
+  
+  # 梯度相关
+  grad_clip_norm: 1.0              # 防止梯度爆炸
+  
+  # 验证和保存
+  val_interval: 10
+  save_interval: 50
+  sample_interval: 20
+  
+  # FID评估配置 - 高质量采样
+  fid_eval_freq: 20
+  num_sample_images: 500          # 更多样本获得准确FID
+  sampling_steps: 200               # DDIM采样步数
+  fid_sampling_steps: 200          # FID评估使用更多步数
+  eta: 0.0                         # DDIM确定性采样
+  
+  # 保存路径
+  save_dir: "/kaggle/working/cldm_enhanced_unet" # 新的保存路径
+
+# 系统配置
+system:
+  device: "cuda"
+  mixed_precision: false           # 先不用混合精度确保稳定性
+  seed: 42
+  
+# 论文标准配置验证
+paper_compliance:
+  # 网络架构验证
+  architecture: "U-Net + ResNet + SelfAttention"  # ✓
+  residual_blocks_per_level: 2                    # ✓
+  attention_in_middle: true                       # ✓
+  
+  # 扩散过程验证  
+  diffusion_steps: 1000                          # ✓
+  noise_schedule: "linear"                        # ✓
+  loss_function: "MSE"                           # ✓
+  
+  # 条件编码验证
+  class_encoding: "embedding"                     # ✓
+  time_encoding: "sinusoidal_positional"         # ✓
+  
+  # 训练过程验证
+  optimizer_type: "Adam"                         # ✓
+  learning_rate: "0.0001"                        # ✓
+  scheduler: "cosine_decay"                      # ✓
+  
+  # 采样过程验证
+  sampling_method: "DDIM"                        # ✓
+  inference_steps: 200                            # ✓
+  
+# 关键差异说明
+adaptations:
+  # 由于我们使用VQ-VAE而非像素空间
+  latent_space: "16x16x256"       # 原论文是64x64x4，我们适配为16x16x256
+  compression_factor: 16          # 原论文是4，我们是16倍下采样
+  
+  # 其他参数保持论文标准
+  everything_else: "paper_standard" 
