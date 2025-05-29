@@ -533,7 +533,18 @@ for epoch in range(epochs):
     if epoch_val_rec_loss < best_val_rec_loss:
         old_best = best_val_rec_loss  # 保存旧的最佳值用于日志
         best_val_rec_loss = epoch_val_rec_loss
-        torch.save(model.state_dict(), os.path.join(save_dir, 'adv_vqvae_best_loss.pth'))
+        
+        # 删除旧的模型文件（如果存在）
+        best_rec_model_path = os.path.join(save_dir, 'adv_vqvae_best_loss.pth')
+        if os.path.exists(best_rec_model_path):
+            try:
+                os.remove(best_rec_model_path)
+                print(f"  🗑️ 已删除旧的最佳重建损失模型")
+            except Exception as e:
+                print(f"  ⚠️ 删除旧模型时出错: {e}")
+        
+        # 保存新的最佳模型
+        torch.save(model.state_dict(), best_rec_model_path)
         print(f"  ⭐ 发现更好的验证重建损失: {best_val_rec_loss:.6f}，已保存模型")
         if epoch == 0:
             print(f"    → 初始模型，设置为基准值")
@@ -545,7 +556,18 @@ for epoch in range(epochs):
     # 可选：也保存基于综合损失的模型（用于对比）
     if current_val_loss < best_val_loss:
         best_val_loss = current_val_loss
-        torch.save(model.state_dict(), os.path.join(save_dir, 'adv_vqvae_best_combined_loss.pth'))
+        
+        # 删除旧的综合损失模型文件（如果存在）
+        best_combined_model_path = os.path.join(save_dir, 'adv_vqvae_best_combined_loss.pth')
+        if os.path.exists(best_combined_model_path):
+            try:
+                os.remove(best_combined_model_path)
+                print(f"  🗑️ 已删除旧的最佳综合损失模型")
+            except Exception as e:
+                print(f"  ⚠️ 删除旧综合损失模型时出错: {e}")
+        
+        # 保存新的最佳综合损失模型
+        torch.save(model.state_dict(), best_combined_model_path)
         print(f"  📊 综合损失最佳: {best_val_loss:.6f}，已保存对比模型")
     
     # 更新学习率调度器（epoch级）
@@ -571,12 +593,23 @@ for epoch in range(epochs):
                 if fid_score < best_fid:
                     old_best = best_fid  # 保存旧的最佳值用于日志
                     best_fid = fid_score
+                    
+                    # 删除旧的FID模型文件（如果存在）
+                    best_fid_model_path = os.path.join(save_dir, 'adv_vqvae_best_fid.pth')
+                    if os.path.exists(best_fid_model_path):
+                        try:
+                            os.remove(best_fid_model_path)
+                            print(f"  🗑️ 已删除旧的最佳FID模型")
+                        except Exception as e:
+                            print(f"  ⚠️ 删除旧FID模型时出错: {e}")
+                    
+                    # 保存新的最佳FID模型
+                    torch.save(model.state_dict(), best_fid_model_path)
                     print(f"  ✓ 发现更好的FID评分: {best_fid:.4f}，已保存模型")
                     if epoch == 0:
                         print(f"    → 初始FID评估，设置为基准值")
                     else:
                         print(f"    → 之前最佳: {old_best:.4f} | 改善: {old_best - fid_score:.4f}")
-                    torch.save(model.state_dict(), os.path.join(save_dir, 'adv_vqvae_best_fid.pth'))
                 else:
                     print(f"  ✗ 当前FID评分 {fid_score:.4f} 未改善 (当前最佳: {best_fid:.4f})")
             except Exception as e:
