@@ -132,19 +132,13 @@ def test_latent_space_quality():
                 
             batch_images = batch_images.to(device)
             z = model.encoder(batch_images)
-            _, _, info = model.vq(z)
             
-            # 获取量化索引
-            if hasattr(info, 'indices'):
-                indices = info.indices
-            elif isinstance(info, dict) and 'indices' in info:
-                indices = info['indices']
-            else:
-                # 如果无法直接获取索引，通过距离计算
-                z_flattened = z.view(-1, z.size(-1))
-                codebook = model.vq.embedding.weight.data
-                distances = torch.cdist(z_flattened, codebook)
-                indices = torch.argmin(distances, dim=1)
+            # 直接计算编码索引
+            z_flattened = z.permute(0,2,3,1).contiguous().view(-1, model.vq.embedding_dim)
+            dist = (z_flattened.pow(2).sum(1, keepdim=True)
+                    - 2 * torch.matmul(z_flattened, model.vq.embedding.weight.t())
+                    + model.vq.embedding.weight.pow(2).sum(1))
+            indices = torch.argmin(dist, dim=1)
             
             all_indices.extend(indices.cpu().numpy().flatten())
             sample_count += batch_images.size(0)
