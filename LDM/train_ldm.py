@@ -121,7 +121,7 @@ def save_sample_images(model, device, config, epoch, save_dir):
         for class_id in range(min(8, num_classes)):  # 最多显示8个类别
             class_labels = torch.tensor([class_id] * num_samples_per_class, device=device)
             
-            generated_images = model.generate(
+            generated_images = model.sample(
                 batch_size=num_samples_per_class,
                 class_labels=class_labels,
                 num_inference_steps=config['inference']['num_inference_steps'],
