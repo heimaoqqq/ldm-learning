@@ -1,32 +1,54 @@
-# Core Dependencies
+# LDM (Latent Diffusion Model) Project Requirements
+# 包含VAE和LDM训练所需的完整依赖项
+
+# ===== Core Dependencies =====
 torch>=2.0.0
 torchvision>=0.15.0
 torchaudio>=2.0.0
 
-# Data Processing
+# ===== Data Processing =====
 numpy>=1.21.0
-pillow>=8.3.0
-opencv-python>=4.5.0
-scikit-learn>=1.0.0
+pillow>=8.3.0               # PIL图像处理
+opencv-python>=4.5.0        # 图像处理
+scikit-learn>=1.0.0         # 数据划分
 
-# Training and Evaluation
-tqdm>=4.62.0
-matplotlib>=3.5.0
-scipy>=1.7.0
-pyyaml>=6.0
+# ===== Training and Evaluation =====
+tqdm>=4.62.0                # 进度条
+matplotlib>=3.5.0           # 图像可视化
+scipy>=1.7.0                # IS分数计算需要
+pyyaml>=6.0                 # 配置文件解析
 
-# Model Architecture
-einops>=0.4.0
+# ===== Model Architecture =====
+einops>=0.4.0               # 张量操作
 
-# Optional: Enhanced Performance
-# accelerate>=0.20.0  # For distributed training
-# wandb>=0.13.0       # For experiment tracking
+# ===== Model Evaluation and Metrics =====
+torch-fidelity==0.3.0      # FID分数计算
+lpips>=0.1.4                # LPIPS距离计算
 
-# Development (optional)
-# jupyter>=1.0.0
-# ipywidgets>=7.6.0
+# ===== LDM特定依赖 =====
+# (所有已在上述包中包含)
 
-# 模型评估和可视化
-tensorboard>=2.6.0
-torch-fidelity==0.3.0
-lpips>=0.1.4 
+# ===== VAE特定依赖 =====  
+# (所有已在上述包中包含)
+
+# ===== Optional: Enhanced Performance =====
+# accelerate>=0.20.0        # 分布式训练加速
+# wandb>=0.13.0             # 实验跟踪
+
+# ===== Development Tools (Optional) =====
+# jupyter>=1.0.0            # Jupyter Notebook
+# ipywidgets>=7.6.0         # 交互式组件
+# tensorboard>=2.6.0        # 可视化训练过程
+
+# ===== Kaggle环境兼容性 =====
+# 以下依赖通常在Kaggle中已预装，但本地环境可能需要：
+# uuid (内置模块)
+# argparse (内置模块) 
+# json (内置模块)
+# os (内置模块)
+# sys (内置模块)
+# time (内置模块)
+# math (内置模块)
+# typing (内置模块)
+# glob (内置模块)
+# shutil (内置模块)
