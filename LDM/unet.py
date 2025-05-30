@@ -78,7 +78,7 @@ class Upsample(nn.Module):
         return hidden_states
 
 class ResnetBlock(nn.Module):
-    """残差块"""
+    """增强的残差块 - 更强的特征学习能力"""
     def __init__(
         self,
         in_channels: int,
@@ -95,9 +95,27 @@ class ResnetBlock(nn.Module):
         self.out_channels = out_channels
         self.use_scale_shift_norm = use_scale_shift_norm
 
+        # 🔧 增强的归一化和激活
         self.norm1 = nn.GroupNorm(num_groups=groups, num_channels=in_channels, eps=1e-6, affine=True)
+        self.norm2 = nn.GroupNorm(num_groups=groups, num_channels=out_channels, eps=1e-6, affine=True)
+        self.norm3 = nn.GroupNorm(num_groups=groups, num_channels=out_channels, eps=1e-6, affine=True)
+        
+        # 🔧 多分支卷积 - 更丰富的特征提取
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        
+        # 深度可分离卷积分支
+        self.depthwise_conv = nn.Conv2d(out_channels, out_channels, kernel_size=3, 
+                                       stride=1, padding=1, groups=out_channels)
+        self.pointwise_conv = nn.Conv2d(out_channels, out_channels, kernel_size=1)
+        
+        # 多尺度特征融合
+        self.conv_1x1 = nn.Conv2d(out_channels, out_channels // 4, kernel_size=1)
+        self.conv_3x3 = nn.Conv2d(out_channels, out_channels // 2, kernel_size=3, padding=1)
+        self.conv_5x5 = nn.Conv2d(out_channels, out_channels // 4, kernel_size=5, padding=2)
+        
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
 
+        # 时间嵌入投影
         if time_embedding_dim is not None:
             if time_embedding_norm == "default":
                 time_embedding_norm = "scale_shift" if use_scale_shift_norm else "default"
@@ -109,25 +127,51 @@ class ResnetBlock(nn.Module):
         else:
             self.time_emb_proj = None
 
-        self.norm2 = nn.GroupNorm(num_groups=groups, num_channels=out_channels, eps=1e-6, affine=True)
+        # 🔧 增强的Dropout和激活
         self.dropout = nn.Dropout(dropout)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
-
         self.nonlinearity = nn.SiLU()
-
+        
+        # 🔧 注意力增强的跳跃连接
         self.skip_connection = (
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+            nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0),
+                nn.GroupNorm(num_groups=min(groups, out_channels), num_channels=out_channels, eps=1e-6)
+            )
             if in_channels != out_channels
             else nn.Identity()
+        )
+        
+        # 🔧 通道注意力机制
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(out_channels, out_channels // 8, 1),
+            nn.SiLU(),
+            nn.Conv2d(out_channels // 8, out_channels, 1),
+            nn.Sigmoid()
         )
 
     def forward(self, input_tensor: torch.Tensor, time_emb: Optional[torch.Tensor] = None) -> torch.Tensor:
         hidden_states = input_tensor
 
+        # 第一个卷积分支
         hidden_states = self.norm1(hidden_states)
         hidden_states = self.nonlinearity(hidden_states)
         hidden_states = self.conv1(hidden_states)
 
+        # 🔧 多尺度特征融合
+        branch_1x1 = self.conv_1x1(hidden_states)
+        branch_3x3 = self.conv_3x3(hidden_states)
+        branch_5x5 = self.conv_5x5(hidden_states)
+        
+        # 深度可分离卷积分支
+        depthwise_out = self.depthwise_conv(hidden_states)
+        depthwise_out = self.pointwise_conv(depthwise_out)
+        
+        # 融合多尺度特征
+        multi_scale_features = torch.cat([branch_1x1, branch_3x3, branch_5x5], dim=1)
+        hidden_states = multi_scale_features + depthwise_out
+
+        # 时间嵌入注入
         if time_emb is not None:
             time_emb = self.nonlinearity(time_emb)
             time_emb = self.time_emb_proj(time_emb)[:, :, None, None]
@@ -147,11 +191,19 @@ class ResnetBlock(nn.Module):
 
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.conv2(hidden_states)
+        
+        # 🔧 通道注意力增强
+        attention_weights = self.channel_attention(hidden_states)
+        hidden_states = hidden_states * attention_weights
+        
+        # 最终归一化
+        hidden_states = self.norm3(hidden_states)
 
+        # 增强的跳跃连接
         return self.skip_connection(input_tensor) + hidden_states
 
 class AttentionBlock(nn.Module):
-    """注意力块"""
+    """增强的注意力块 - 更强的空间和特征注意力"""
     def __init__(
         self,
         channels: int,
@@ -163,6 +215,10 @@ class AttentionBlock(nn.Module):
         self.channels = channels
 
         self.norm = nn.GroupNorm(num_groups=num_groups, num_channels=channels, eps=1e-6, affine=True)
+        
+        # 🔧 预归一化和后归一化
+        self.pre_norm = nn.GroupNorm(num_groups=num_groups, num_channels=channels, eps=1e-6, affine=True)
+        self.post_norm = nn.GroupNorm(num_groups=num_groups, num_channels=channels, eps=1e-6, affine=True)
 
         self.num_heads = num_heads
         self.head_size = channels // num_heads
@@ -172,8 +228,46 @@ class AttentionBlock(nn.Module):
         self.to_q = nn.Linear(channels, channels, bias=False)
         self.to_k = nn.Linear(encoder_hidden_states_channels, channels, bias=False)
         self.to_v = nn.Linear(encoder_hidden_states_channels, channels, bias=False)
+        
+        # 🔧 多尺度查询、键、值投影
+        self.to_q_multi = nn.ModuleList([
+            nn.Linear(channels, channels // 2, bias=False),
+            nn.Linear(channels, channels // 2, bias=False),
+        ])
+        self.to_k_multi = nn.ModuleList([
+            nn.Linear(encoder_hidden_states_channels, channels // 2, bias=False),
+            nn.Linear(encoder_hidden_states_channels, channels // 2, bias=False),
+        ])
+        self.to_v_multi = nn.ModuleList([
+            nn.Linear(encoder_hidden_states_channels, channels // 2, bias=False),
+            nn.Linear(encoder_hidden_states_channels, channels // 2, bias=False),
+        ])
 
-        self.to_out = nn.Sequential(nn.Linear(channels, channels), nn.Dropout(0.0))
+        # 🔧 空间注意力机制
+        self.spatial_attention = nn.Sequential(
+            nn.Conv2d(channels, channels // 8, 1),
+            nn.SiLU(),
+            nn.Conv2d(channels // 8, channels // 8, 3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(channels // 8, 1, 1),
+            nn.Sigmoid()
+        )
+        
+        # 🔧 位置编码
+        self.pos_embedding = nn.Parameter(torch.randn(1, channels, 32, 32) * 0.02)
+        
+        # 🔧 特征融合层
+        self.feature_fusion = nn.Sequential(
+            nn.Linear(channels * 2, channels),
+            nn.SiLU(),
+            nn.Linear(channels, channels),
+            nn.Dropout(0.1)
+        )
+
+        self.to_out = nn.Sequential(
+            nn.Linear(channels, channels), 
+            nn.Dropout(0.1)  # 增加dropout
+        )
 
     def reshape_heads_to_batch_dim(self, tensor: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, dim = tensor.shape
@@ -196,13 +290,27 @@ class AttentionBlock(nn.Module):
     ) -> torch.Tensor:
         batch, channel, height, width = hidden_states.shape
         residual = hidden_states
-        hidden_states = self.norm(hidden_states)
+        
+        # 🔧 预归一化
+        hidden_states = self.pre_norm(hidden_states)
+        
+        # 🔧 添加位置编码
+        if height <= 32 and width <= 32:
+            pos_emb = F.interpolate(self.pos_embedding, size=(height, width), mode='bilinear', align_corners=False)
+            hidden_states = hidden_states + pos_emb
+        
+        # 🔧 空间注意力增强
+        spatial_weights = self.spatial_attention(hidden_states)
+        spatial_enhanced = hidden_states * spatial_weights
+        
+        # 标准注意力路径
+        standard_hidden = self.norm(hidden_states)
+        standard_hidden = standard_hidden.view(batch, channel, height * width).transpose(1, 2)
 
-        hidden_states = hidden_states.view(batch, channel, height * width).transpose(1, 2)
+        encoder_hidden_states = encoder_hidden_states if encoder_hidden_states is not None else standard_hidden
 
-        encoder_hidden_states = encoder_hidden_states if encoder_hidden_states is not None else hidden_states
-
-        query = self.to_q(hidden_states)
+        # 标准注意力计算
+        query = self.to_q(standard_hidden)
         key = self.to_k(encoder_hidden_states)
         value = self.to_v(encoder_hidden_states)
 
@@ -216,13 +324,43 @@ class AttentionBlock(nn.Module):
         attention_probs = torch.softmax(attention_scores, dim=-1)
 
         # 应用注意力权重
-        hidden_states = torch.matmul(attention_probs, value)
-        hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
-        hidden_states = self.to_out(hidden_states)
+        standard_out = torch.matmul(attention_probs, value)
+        standard_out = self.reshape_batch_dim_to_heads(standard_out)
+        
+        # 🔧 多尺度注意力路径
+        multi_scale_hidden = spatial_enhanced.view(batch, channel, height * width).transpose(1, 2)
+        
+        multi_queries = []
+        multi_keys = []
+        multi_values = []
+        
+        for q_proj, k_proj, v_proj in zip(self.to_q_multi, self.to_k_multi, self.to_v_multi):
+            multi_queries.append(q_proj(multi_scale_hidden))
+            multi_keys.append(k_proj(encoder_hidden_states))
+            multi_values.append(v_proj(encoder_hidden_states))
+        
+        multi_out_parts = []
+        for query_part, key_part, value_part in zip(multi_queries, multi_keys, multi_values):
+            # 简化的注意力计算
+            attn_scores = torch.matmul(query_part, key_part.transpose(-1, -2)) / math.sqrt(query_part.size(-1))
+            attn_probs = torch.softmax(attn_scores, dim=-1)
+            attn_out = torch.matmul(attn_probs, value_part)
+            multi_out_parts.append(attn_out)
+        
+        multi_out = torch.cat(multi_out_parts, dim=-1)
+        
+        # 🔧 特征融合
+        combined_features = torch.cat([standard_out, multi_out], dim=-1)
+        fused_output = self.feature_fusion(combined_features)
+        
+        final_output = self.to_out(fused_output)
 
         # 重新reshape为原始形状
-        hidden_states = hidden_states.transpose(-1, -2).reshape(batch, channel, height, width)
-        return hidden_states + residual
+        final_output = final_output.transpose(-1, -2).reshape(batch, channel, height, width)
+        
+        # 🔧 后归一化和残差连接
+        final_output = self.post_norm(final_output)
+        return final_output + residual
 
 class UNetModel(nn.Module):
     """
