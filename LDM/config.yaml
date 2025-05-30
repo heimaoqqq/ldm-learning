@@ -15,7 +15,7 @@ vae:
 dataset:
   root_dir: "/kaggle/input/dataset"  # Kaggle数据集路径
   batch_size: 8  # 🔧 恢复到16获得更好的训练稳定性
-  num_workers: 4  # 保持4个workers获得好的数据加载速度
+  num_workers: 2  # 保持4个workers获得好的数据加载速度
   val_split: 0.2
   image_size: 256
 
