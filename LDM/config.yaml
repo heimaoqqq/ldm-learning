@@ -2,7 +2,7 @@
 
 # VAE 相关配置 (使用预训练的VQ-VAE)
 vae:
-  model_path: "/kaggle/input/vae-best-fid2/adv_vqvae_best_fid2.pth"  # VQ-VAE模型路径
+  model_path: "/kaggle/input/vae-best-fid/adv_vqvae_best_fid.pth"  # VQ-VAE模型路径
   in_channels: 3
   latent_dim: 256
   num_embeddings: 512
@@ -43,7 +43,7 @@ unet:
   
   # 网络层配置
   num_res_blocks: 2  # 每层的残差块数量
-  attention_resolutions: [8, 16]  # 添加attention的分辨率 (32x32的1/4和1/2)
+  attention_resolutions: [8, 16]  # 添加attention的下采样因子 (对应4x4和2x2分辨率)
   channel_mult: [1, 2, 4, 4]  # 各层通道倍数
   num_heads: 8  # 注意力头数
   use_scale_shift_norm: true  # 使用条件归一化
