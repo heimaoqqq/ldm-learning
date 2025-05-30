@@ -10,7 +10,7 @@ import os
 from typing import Tuple, Optional, List
 from tqdm import tqdm
 
-# 添加路径
+# 在Kaggle环境中，VAE模块已复制到当前目录
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
 
 def denormalize(x):
