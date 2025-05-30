@@ -155,8 +155,31 @@ class LatentDiffusionModel(nn.Module):
             class_labels=class_labels,
         )
         
-        # 6. 计算损失
+        # 6. 计算损失 (添加数值稳定性检查)
+        # 检查预测噪声是否包含异常值
+        if torch.any(torch.isnan(predicted_noise)) or torch.any(torch.isinf(predicted_noise)):
+            print(f"⚠️ 警告: 预测噪声包含NaN或Inf值")
+            print(f"   预测噪声范围: [{predicted_noise.min().item():.6f}, {predicted_noise.max().item():.6f}]")
+            # 用零替换异常值
+            predicted_noise = torch.where(torch.isnan(predicted_noise) | torch.isinf(predicted_noise), 
+                                         torch.zeros_like(predicted_noise), predicted_noise)
+        
+        # 检查目标噪声是否包含异常值
+        if torch.any(torch.isnan(noise)) or torch.any(torch.isinf(noise)):
+            print(f"⚠️ 警告: 目标噪声包含NaN或Inf值")
+            noise = torch.where(torch.isnan(noise) | torch.isinf(noise), 
+                              torch.zeros_like(noise), noise)
+        
+        # 计算MSE损失
         loss = F.mse_loss(predicted_noise, noise)
+        
+        # 检查损失值
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"⚠️ 严重警告: 损失值为NaN或Inf，设置为1.0")
+            loss = torch.tensor(1.0, device=loss.device, requires_grad=True)
+        
+        # 限制损失值范围，防止过大
+        loss = torch.clamp(loss, min=0.0, max=100.0)
         
         return {
             'loss': loss,
