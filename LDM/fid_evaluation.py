@@ -342,7 +342,7 @@ class FIDEvaluator:
                     class_labels = torch.tensor([class_id] * current_batch_size, 
                                                device=self.device)
                     
-                    images = model.generate(
+                    images = model.sample(
                         batch_size=current_batch_size,
                         class_labels=class_labels,
                         num_inference_steps=50,
