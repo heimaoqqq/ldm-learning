@@ -1,8 +1,8 @@
-# LDM (Latent Diffusion Model) 配置文件
+a# LDM (Latent Diffusion Model) 配置文件
 
 # VAE 相关配置 (使用预训练的VQ-VAE)
 vae:
-  model_path: "/kaggle/input/vae-best-fid/adv_vqvae_best_fid.pth"  # VQ-VAE模型路径
+  model_path: "/kaggle/input/vae-best-fid/adv_vqvae_best_fid.pth"  # Kaggle VAE模型路径
   in_channels: 3
   latent_dim: 256
   num_embeddings: 512
@@ -13,7 +13,7 @@ vae:
 
 # 数据集配置
 dataset:
-  root_dir: "/kaggle/input/dataset"  # 微多普勒时频图数据集路径
+  root_dir: "/kaggle/input/dataset"  # Kaggle数据集路径
   batch_size: 16  # 推荐8-16 (大latent图)
   num_workers: 4
   val_split: 0.2
@@ -56,9 +56,9 @@ unet:
 # 训练配置
 training:
   epochs: 500
-  lr: 0.0001  # AdamW学习率 (使用小数格式而不是科学记数法)
+  lr: 0.00001  # 进一步降低学习率 (从0.00002降到0.00001)
   weight_decay: 0.01
-  warmup_steps: 1000  # 学习率预热步数
+  warmup_steps: 2000  # 增加预热步数
   
   # 保存设置
   save_dir: "ldm_models"
@@ -73,8 +73,8 @@ training:
   use_cfg: true  # 使用无分类器引导
   cfg_dropout_prob: 0.1  # 条件丢弃概率 (用于CFG训练)
   
-  # 梯度裁剪
-  grad_clip_norm: 1.0
+  # 梯度裁剪 (更严格的梯度裁剪)
+  grad_clip_norm: 0.1  # 从0.5降到0.1，防止梯度爆炸
   
   # 调度器
   use_scheduler: true
