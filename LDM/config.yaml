@@ -1,4 +1,4 @@
-a# LDM (Latent Diffusion Model) 配置文件
+# LDM (Latent Diffusion Model) 配置文件
 
 # VAE 相关配置 (使用预训练的VQ-VAE)
 vae:
