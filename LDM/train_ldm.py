@@ -17,8 +17,10 @@ import json
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
 
 from ldm import LatentDiffusionModel
+# 直接从VAE目录导入dataset功能
 from dataset import build_dataloader
 from fid_evaluation import FIDEvaluator
+from metrics import DiffusionMetrics, denormalize_for_metrics
 
 def get_cosine_schedule_with_warmup(
     optimizer: torch.optim.Optimizer,
@@ -121,6 +123,18 @@ def train_ldm():
     if vae_path.startswith('../'):
         vae_path = os.path.join(os.path.dirname(__file__), vae_path)
     
+    # 检查VAE文件是否存在
+    if not os.path.exists(vae_path):
+        print(f"❌ 错误: VAE权重文件不存在: {vae_path}")
+        print(f"💡 请先训练VAE模型，运行以下命令:")
+        print(f"   cd VAE")
+        print(f"   python train_adv_vqvae.py")
+        print(f"训练完成后，VAE模型将保存为 vae_models/adv_vqvae_best_fid.pth")
+        print(f"然后再运行LDM训练")
+        return
+    
+    print(f"✓ 发现VAE权重文件: {vae_path}")
+    
     model = LatentDiffusionModel(
         vae_config=config['vae'],
         unet_config=config['unet'],
@@ -134,6 +148,10 @@ def train_ldm():
     # 初始化FID评估器
     print("初始化FID评估器...")
     fid_evaluator = FIDEvaluator(device=device)
+    
+    # 初始化扩散指标计算器
+    print("初始化扩散指标计算器...")
+    diffusion_metrics = DiffusionMetrics(device=device)
     
     # 计算真实数据特征（用于FID计算）
     # 使用验证集来计算真实数据特征，减少计算开销
@@ -173,6 +191,8 @@ def train_ldm():
         'train_loss': [],
         'val_loss': [],
         'fid_scores': [],
+        'inception_scores': [],
+        'noise_metrics': [],
         'learning_rates': []
     }
     
@@ -252,10 +272,20 @@ def train_ldm():
         
         # 验证
         avg_val_loss = None
+        noise_metrics_epoch = {}
         if val_loader:
             model.eval()
             val_loss = 0.0
             val_steps = 0
+            
+            # 用于噪声指标计算的累加器
+            total_noise_metrics = {
+                'noise_mse': 0.0,
+                'noise_mae': 0.0,
+                'noise_psnr': 0.0,
+                'noise_cosine_similarity': 0.0,
+                'noise_correlation': 0.0
+            }
             
             with torch.no_grad():
                 for images, labels in val_loader:
@@ -271,17 +301,41 @@ def train_ldm():
                         loss = outputs['loss']
                     
                     val_loss += loss.item()
+                    
+                    # 计算噪声预测指标
+                    if 'predicted_noise' in outputs and 'target_noise' in outputs:
+                        batch_noise_metrics = diffusion_metrics.calculate_all_metrics(
+                            outputs['predicted_noise'], 
+                            outputs['target_noise']
+                        )
+                        
+                        # 累加指标
+                        for key in total_noise_metrics.keys():
+                            if key in batch_noise_metrics:
+                                total_noise_metrics[key] += batch_noise_metrics[key]
+                    
                     val_steps += 1
             
             avg_val_loss = val_loss / val_steps
+            
+            # 计算平均噪声指标
+            if val_steps > 0:
+                for key in total_noise_metrics.keys():
+                    noise_metrics_epoch[key] = total_noise_metrics[key] / val_steps
+            
             print(f"  验证损失: {avg_val_loss:.4f}")
+            if noise_metrics_epoch:
+                print(f"  噪声MSE: {noise_metrics_epoch.get('noise_mse', 0):.6f}")
+                print(f"  噪声PSNR: {noise_metrics_epoch.get('noise_psnr', 0):.2f}")
+                print(f"  噪声余弦相似度: {noise_metrics_epoch.get('noise_cosine_similarity', 0):.4f}")
         else:
             avg_val_loss = avg_epoch_loss
         
         # FID评估 - 每10个epoch计算一次
         fid_score = None
+        inception_score = None
         if (epoch + 1) % 10 == 0:
-            print(f"  计算FID分数...")
+            print(f"  计算FID分数和IS分数...")
             try:
                 fid_start_time = time.time()
                 fid_score = fid_evaluator.evaluate_model(
@@ -293,6 +347,43 @@ def train_ldm():
                 fid_time = time.time() - fid_start_time
                 print(f"  FID分数: {fid_score:.2f} (用时: {fid_time:.1f}s)")
                 
+                # 计算IS分数
+                print(f"  计算IS分数...")
+                is_start_time = time.time()
+                
+                # 生成样本用于IS计算
+                model.eval()
+                with torch.no_grad():
+                    generated_samples = []
+                    num_is_samples = min(200, val_dataset_len)  # IS分数样本数
+                    
+                    for i in range(0, num_is_samples, 8):  # 每次生成8个样本
+                        batch_size = min(8, num_is_samples - i)
+                        # 随机选择类别
+                        class_labels = torch.randint(0, config['unet']['num_classes'], 
+                                                    (batch_size,), device=device)
+                        
+                        generated_batch = model.generate(
+                            batch_size=batch_size,
+                            class_labels=class_labels,
+                            num_inference_steps=20,  # 较少步数以节省时间
+                            guidance_scale=config['inference']['guidance_scale'],
+                        )
+                        
+                        # 反归一化到[0,1]
+                        generated_batch = denormalize_for_metrics(generated_batch)
+                        generated_samples.append(generated_batch)
+                    
+                    if generated_samples:
+                        all_generated = torch.cat(generated_samples, dim=0)
+                        is_mean, is_std = diffusion_metrics.inception_calculator.calculate_inception_score(
+                            all_generated, splits=5
+                        )
+                        inception_score = {'mean': is_mean, 'std': is_std}
+                        
+                        is_time = time.time() - is_start_time
+                        print(f"  IS分数: {is_mean:.2f}±{is_std:.2f} (用时: {is_time:.1f}s)")
+                
                 # 更新最佳FID
                 if fid_score < best_fid:
                     best_fid = fid_score
@@ -301,14 +392,17 @@ def train_ldm():
                     print(f"  🎉 FID新纪录！保存最佳FID模型: {best_fid_model_path}")
                 
             except Exception as e:
-                print(f"  ⚠️ FID计算失败: {e}")
+                print(f"  ⚠️ 指标计算失败: {e}")
                 fid_score = None
+                inception_score = None
         
         # 记录训练日志
         training_log['epochs'].append(epoch + 1)
         training_log['train_loss'].append(avg_epoch_loss)
         training_log['val_loss'].append(avg_val_loss)
         training_log['fid_scores'].append(fid_score)
+        training_log['inception_scores'].append(inception_score)
+        training_log['noise_metrics'].append(noise_metrics_epoch)
         training_log['learning_rates'].append(current_lr)
         
         # 保存训练日志
