@@ -449,5 +449,14 @@ class UNetModel(nn.Module):
         h = self.out_norm(h)
         h = F.silu(h)
         h = self.out_conv(h)
+        
+        # 添加数值稳定性检查和限制
+        # 检查输出是否包含异常值
+        if torch.any(torch.isnan(h)) or torch.any(torch.isinf(h)):
+            print(f"⚠️ U-Net输出包含NaN或Inf值，范围: [{h.min().item():.6f}, {h.max().item():.6f}]")
+            h = torch.where(torch.isnan(h) | torch.isinf(h), torch.zeros_like(h), h)
+        
+        # 限制输出值范围，防止过大的预测
+        h = torch.clamp(h, min=-10.0, max=10.0)
 
         return h 
