@@ -37,7 +37,7 @@ def generate_class_samples(
     with torch.no_grad():
         class_labels = torch.tensor([class_id] * num_samples, device=device)
         
-        generated_images = model.generate(
+        generated_images = model.sample(
             batch_size=num_samples,
             class_labels=class_labels,
             num_inference_steps=config['inference']['num_inference_steps'],
@@ -168,13 +168,12 @@ def guidance_scale_comparison(
         with torch.no_grad():
             class_labels = torch.tensor([class_id], device=device)
             
-            generated_image = model.generate(
+            generated_image = model.sample(
                 batch_size=1,
                 class_labels=class_labels,
                 num_inference_steps=config['inference']['num_inference_steps'],
                 guidance_scale=guidance_scale,
                 eta=config['inference']['eta'],
-                latents=initial_latents.clone(),
             )
             
             # 反归一化
@@ -216,13 +215,12 @@ def sampling_steps_comparison(
         with torch.no_grad():
             class_labels = torch.tensor([class_id], device=device)
             
-            generated_image = model.generate(
+            generated_image = model.sample(
                 batch_size=1,
                 class_labels=class_labels,
                 num_inference_steps=num_steps,
                 guidance_scale=config['inference']['guidance_scale'],
                 eta=config['inference']['eta'],
-                latents=initial_latents.clone(),
             )
             
             generated_image = denormalize(generated_image)
