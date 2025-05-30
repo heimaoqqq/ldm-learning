@@ -1,355 +1,223 @@
+#!/usr/bin/env python3
+"""
+潜在扩散模型 (Latent Diffusion Model) 主要实现
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import sys
 import os
+import math
+from typing import Dict, Tuple, Optional, Any
 
-# 在Kaggle环境中，VAE模块已复制到当前目录
+# 添加VAE模块路径
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
 
 from adv_vq_vae import AdvVQVAE
-from unet import UNetModel
-from scheduler import DDPMScheduler, DDIMScheduler
-from typing import Optional, Union, Tuple, Dict, Any
-import numpy as np
+from unet import UNetModel  # 使用修复后的原始U-Net
+from scheduler import DDPMScheduler
 
 class LatentDiffusionModel(nn.Module):
     """
-    潜在扩散模型 (LDM)
-    结合预训练的VAE和U-Net进行潜在空间中的扩散生成
+    潜在扩散模型
     """
-    def __init__(
-        self,
-        # VAE配置
-        vae_config: Dict[str, Any],
-        # U-Net配置
-        unet_config: Dict[str, Any],
-        # 扩散配置
-        scheduler_config: Dict[str, Any],
-        # 可选参数
-        vae_path: Optional[str] = None,
-        freeze_vae: bool = True,
-        # 训练配置
-        use_cfg: bool = True,
-        cfg_dropout_prob: float = 0.1,
-    ):
+    def __init__(self, config: Dict[str, Any]):
         super().__init__()
         
-        self.use_cfg = use_cfg
-        self.cfg_dropout_prob = cfg_dropout_prob
+        self.config = config
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # 初始化VAE
-        self.vae = AdvVQVAE(
+        # 初始化VAE (预训练，冻结参数)
+        self.vae = self._init_vae(config['vae'])
+        
+        # 初始化扩散调度器
+        self.scheduler = DDPMScheduler(
+            num_train_timesteps=config['diffusion']['timesteps'],
+            beta_start=config['diffusion']['beta_start'],
+            beta_end=config['diffusion']['beta_end'],
+            schedule_type=config['diffusion']['noise_schedule']
+        )
+        
+        # 初始化U-Net
+        self.unet = UNetModel(**config['unet'])
+        
+        # 其他配置
+        self.use_cfg = config['training'].get('use_cfg', False)
+        self.cfg_dropout_prob = config['training'].get('cfg_dropout_prob', 0.1)
+        
+    def _init_vae(self, vae_config: Dict[str, Any]) -> AdvVQVAE:
+        """初始化VAE并加载预训练权重"""
+        vae = AdvVQVAE(
             in_channels=vae_config['in_channels'],
             latent_dim=vae_config['latent_dim'],
             num_embeddings=vae_config['num_embeddings'],
             beta=vae_config['beta'],
             decay=vae_config['vq_ema_decay'],
-            groups=vae_config['groups'],
-            disc_ndf=64
+            groups=vae_config['groups']
         )
         
-        # 加载预训练的VAE权重
-        if vae_path and os.path.exists(vae_path):
-            print(f"加载预训练VAE: {vae_path}")
-            checkpoint = torch.load(vae_path, map_location='cpu')
-            self.vae.load_state_dict(checkpoint)
-        else:
-            print(f"警告: VAE权重文件不存在: {vae_path}")
+        # 加载预训练权重
+        if 'model_path' in vae_config and vae_config['model_path']:
+            try:
+                print(f"🔄 加载VAE预训练模型: {vae_config['model_path']}")
+                state_dict = torch.load(vae_config['model_path'], map_location='cpu')
+                vae.load_state_dict(state_dict)
+                print("✅ VAE模型加载成功")
+            except Exception as e:
+                print(f"⚠️ VAE模型加载失败: {e}")
         
         # 冻结VAE参数
-        if freeze_vae:
-            for param in self.vae.parameters():
+        if vae_config.get('freeze', True):
+            for param in vae.parameters():
                 param.requires_grad = False
-            self.vae.eval()
-            print("VAE参数已冻结")
+            vae.eval()
+            print("❄️ VAE参数已冻结")
         
-        # 初始化U-Net
-        self.unet = UNetModel(**unet_config)
+        return vae
+    
+    def encode_to_latent(self, images: torch.Tensor) -> torch.Tensor:
+        """将图像编码到潜在空间"""
+        with torch.no_grad():
+            # VAE编码
+            encoded = self.vae.encoder(images)
+            # VQ量化
+            quantized, _, _ = self.vae.vq(encoded)
+            return quantized
+    
+    def decode_from_latent(self, latents: torch.Tensor) -> torch.Tensor:
+        """从潜在空间解码到图像"""
+        with torch.no_grad():
+            return self.vae.decoder(latents)
+    
+    def forward(self, images: torch.Tensor, class_labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """
+        前向传播
         
-        # 初始化调度器
-        self.scheduler = DDPMScheduler(
-            num_train_timesteps=scheduler_config['timesteps'],
-            beta_start=scheduler_config['beta_start'],
-            beta_end=scheduler_config['beta_end'],
-            beta_schedule=scheduler_config['noise_schedule'],
-            clip_denoised=scheduler_config['clip_denoised'],
+        Args:
+            images: [B, 3, H, W] 输入图像
+            class_labels: [B] 类别标签
+            
+        Returns:
+            包含损失信息的字典
+        """
+        batch_size = images.shape[0]
+        
+        # 编码到潜在空间
+        latents = self.encode_to_latent(images)  # [B, C, H', W']
+        
+        # 采样时间步
+        timesteps = torch.randint(
+            0, self.scheduler.num_train_timesteps, 
+            (batch_size,), device=images.device
         )
         
-        print(f"LDM模型初始化完成:")
-        print(f"  - VAE: {vae_config['latent_dim']}维潜在空间")
-        print(f"  - U-Net: {unet_config['in_channels']}→{unet_config['out_channels']}通道")
-        print(f"  - 扩散步数: {scheduler_config['timesteps']}")
-        print(f"  - 噪声调度: {scheduler_config['noise_schedule']}")
-    
-    @torch.no_grad()
-    def encode_to_latent(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        将图像编码到潜在空间
-        Args:
-            x: [batch_size, 3, height, width] 输入图像 (已归一化到[-1,1])
-        Returns:
-            z: [batch_size, latent_dim, h, w] 潜在表示
-        """
-        z = self.vae.encoder(x)
-        z_q, _, _ = self.vae.vq(z)
-        return z_q
-    
-    @torch.no_grad()
-    def decode_from_latent(self, z: torch.Tensor) -> torch.Tensor:
-        """
-        从潜在空间解码到图像
-        Args:
-            z: [batch_size, latent_dim, h, w] 潜在表示
-        Returns:
-            x: [batch_size, 3, height, width] 重建图像
-        """
-        return self.vae.decoder(z)
-    
-    def forward(
-        self,
-        x: torch.Tensor,
-        class_labels: Optional[torch.Tensor] = None,
-        noise: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        训练时的前向传播
-        Args:
-            x: [batch_size, 3, height, width] 输入图像
-            class_labels: [batch_size] 类别标签
-            noise: [batch_size, latent_dim, h, w] 可选的预定义噪声
-        Returns:
-            包含损失和预测的字典
-        """
-        batch_size = x.shape[0]
-        device = x.device
-        
-        # 1. 编码到潜在空间
-        with torch.no_grad():
-            latents = self.encode_to_latent(x)  # [B, latent_dim, h, w]
-        
-        # 2. 采样噪声和时间步
-        if noise is None:
-            noise = torch.randn_like(latents)
-        
-        timesteps = torch.randint(
-            0, self.scheduler.num_train_timesteps, (batch_size,), device=device
-        ).long()
-        
-        # 3. 添加噪声 (前向扩散过程)
+        # 添加噪声
+        noise = torch.randn_like(latents)
         noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
         
-        # 4. Classifier-Free Guidance训练
+        # CFG训练 (随机丢弃类别标签)
         if self.use_cfg and class_labels is not None:
-            # 随机丢弃一部分条件
-            if self.training:
-                dropout_mask = torch.rand(batch_size, device=device) < self.cfg_dropout_prob
-                # 将被丢弃的标签设为特殊值 (如-1或num_classes)
-                unconditional_labels = torch.full_like(class_labels, -1)
-                class_labels = torch.where(dropout_mask, unconditional_labels, class_labels)
+            # 随机mask掉一些类别标签用于CFG训练
+            cfg_mask = torch.rand(batch_size, device=images.device) < self.cfg_dropout_prob
+            class_labels = class_labels.clone()
+            class_labels[cfg_mask] = -1  # 使用-1表示无条件
         
-        # 5. 预测噪声
-        predicted_noise = self.unet(
-            x=noisy_latents,
-            timesteps=timesteps,
-            class_labels=class_labels,
-        )
+        # U-Net预测噪声
+        predicted_noise = self.unet(noisy_latents, timesteps, class_labels)
         
-        # 6. 计算损失 (添加数值稳定性检查)
-        # 检查预测噪声是否包含异常值
-        if torch.any(torch.isnan(predicted_noise)) or torch.any(torch.isinf(predicted_noise)):
-            print(f"⚠️ 警告: 预测噪声包含NaN或Inf值")
-            print(f"   预测噪声范围: [{predicted_noise.min().item():.6f}, {predicted_noise.max().item():.6f}]")
-            # 用零替换异常值
-            predicted_noise = torch.where(torch.isnan(predicted_noise) | torch.isinf(predicted_noise), 
-                                         torch.zeros_like(predicted_noise), predicted_noise)
-        
-        # 检查目标噪声是否包含异常值
-        if torch.any(torch.isnan(noise)) or torch.any(torch.isinf(noise)):
-            print(f"⚠️ 警告: 目标噪声包含NaN或Inf值")
-            noise = torch.where(torch.isnan(noise) | torch.isinf(noise), 
-                              torch.zeros_like(noise), noise)
-        
-        # 计算MSE损失
-        loss = F.mse_loss(predicted_noise, noise)
-        
-        # 检查损失值
-        if torch.isnan(loss) or torch.isinf(loss):
-            print(f"⚠️ 严重警告: 损失值为NaN或Inf，设置为1.0")
-            loss = torch.tensor(1.0, device=loss.device, requires_grad=True)
-        
-        # 限制损失值范围，防止过大
-        loss = torch.clamp(loss, min=0.0, max=100.0)
+        # 计算损失
+        noise_loss = F.mse_loss(predicted_noise, noise, reduction='mean')
         
         return {
-            'loss': loss,
-            'predicted_noise': predicted_noise,
-            'target_noise': noise,
-            'timesteps': timesteps,
-            'noisy_latents': noisy_latents,
+            'noise_loss': noise_loss,
+            'total_loss': noise_loss
         }
     
     @torch.no_grad()
-    def generate(
-        self,
-        batch_size: int = 1,
+    def sample(
+        self, 
+        batch_size: int, 
         class_labels: Optional[torch.Tensor] = None,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
-        eta: float = 0.0,
-        generator: Optional[torch.Generator] = None,
-        latents: Optional[torch.Tensor] = None,
-        return_intermediates: bool = False,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, list]]:
+        eta: float = 0.0
+    ) -> torch.Tensor:
         """
-        生成图像
+        DDIM采样生成图像
+        
         Args:
-            batch_size: 批量大小
+            batch_size: 批次大小
             class_labels: [batch_size] 类别标签
             num_inference_steps: 推理步数
             guidance_scale: CFG引导强度
-            eta: DDIM参数
-            generator: 随机数生成器
-            latents: 初始潜在表示 (可选)
-            return_intermediates: 是否返回中间结果
+            eta: DDIM参数 (0为确定性采样)
+            
         Returns:
-            生成的图像 [batch_size, 3, height, width]
+            生成的图像 [batch_size, 3, H, W]
         """
-        device = next(self.parameters()).device
+        device = self.device
+        
+        # 获取潜在空间尺寸
+        # 假设输入图像为256x256，VAE下采样8倍，得到32x32
+        latent_height = 32
+        latent_width = 32
+        latent_channels = self.config['unet']['in_channels']
+        
+        # 初始化随机噪声
+        latents = torch.randn(
+            batch_size, latent_channels, latent_height, latent_width,
+            device=device
+        )
         
         # 设置推理调度器
-        if eta > 0:
-            scheduler = DDIMScheduler(
-                eta=eta,
-                num_train_timesteps=self.scheduler.num_train_timesteps,
-                beta_start=self.scheduler.beta_start,
-                beta_end=self.scheduler.beta_end,
-                beta_schedule=self.scheduler.beta_schedule,
-                clip_denoised=self.scheduler.clip_denoised,
-            )
-        else:
-            scheduler = self.scheduler
+        self.scheduler.set_timesteps(num_inference_steps)
+        
+        for t in self.scheduler.timesteps:
+            # 扩展时间步
+            t_batch = t.unsqueeze(0).repeat(batch_size).to(device)
             
-        scheduler.set_timesteps(num_inference_steps, device=device)
-        
-        # 初始化潜在表示
-        if latents is None:
-            # 从配置推断潜在空间形状
-            latent_shape = (batch_size, self.unet.in_channels, 32, 32)  # 32x32潜在空间
-            latents = torch.randn(latent_shape, generator=generator, device=device)
-        
-        latents = latents * scheduler.init_noise_sigma if hasattr(scheduler, 'init_noise_sigma') else latents
-        
-        intermediates = []
-        
-        # 去噪循环
-        for i, t in enumerate(scheduler.timesteps):
-            # 扩展潜在表示以用于CFG
-            latent_model_input = torch.cat([latents] * 2) if guidance_scale > 1.0 else latents
-            
-            # 预测噪声
-            if guidance_scale > 1.0 and class_labels is not None:
-                # Classifier-Free Guidance
-                # 无条件预测
-                unconditional_labels = torch.full_like(class_labels, -1)
-                combined_labels = torch.cat([unconditional_labels, class_labels])
+            if self.use_cfg and class_labels is not None and guidance_scale > 1.0:
+                # CFG: 同时预测有条件和无条件噪声
+                latent_model_input = torch.cat([latents] * 2)
+                t_input = torch.cat([t_batch] * 2)
                 
-                noise_pred = self.unet(
-                    x=latent_model_input,
-                    timesteps=torch.cat([t.unsqueeze(0)] * latent_model_input.shape[0]),
-                    class_labels=combined_labels,
-                )
+                # 创建条件标签 (有条件 + 无条件)
+                class_input = torch.cat([
+                    class_labels,
+                    torch.full_like(class_labels, -1)  # 无条件标签
+                ])
                 
-                # 分离有条件和无条件的预测
-                noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+                # U-Net预测
+                noise_pred = self.unet(latent_model_input, t_input, class_input)
+                
+                # 分离有条件和无条件预测
+                noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
+                
+                # CFG引导
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
             else:
-                noise_pred = self.unet(
-                    x=latents,
-                    timesteps=t.unsqueeze(0).repeat(batch_size),
-                    class_labels=class_labels,
-                )
+                # 无CFG的标准预测
+                noise_pred = self.unet(latents, t_batch, class_labels)
             
-            # 计算前一时间步的潜在表示
-            latents = scheduler.step(
-                model_output=noise_pred,
-                timestep=t,
-                sample=latents,
-                generator=generator,
-            ).prev_sample
-            
-            if return_intermediates:
-                intermediates.append(latents.cpu().clone())
+            # DDIM步骤
+            latents = self.scheduler.step(noise_pred, t, latents, eta=eta)
         
         # 解码到图像空间
         images = self.decode_from_latent(latents)
         
-        if return_intermediates:
-            return images, intermediates
-        else:
-            return images
-    
-    @torch.no_grad()
-    def interpolate(
-        self,
-        images1: torch.Tensor,
-        images2: torch.Tensor,
-        num_steps: int = 10,
-        class_labels: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        在潜在空间中进行图像插值
-        Args:
-            images1: [batch_size, 3, height, width] 起始图像
-            images2: [batch_size, 3, height, width] 结束图像
-            num_steps: 插值步数
-            class_labels: 类别标签
-        Returns:
-            插值图像序列 [num_steps, batch_size, 3, height, width]
-        """
-        # 编码到潜在空间
-        latents1 = self.encode_to_latent(images1)
-        latents2 = self.encode_to_latent(images2)
+        # 归一化到[0,1]
+        images = (images + 1.0) / 2.0
+        images = torch.clamp(images, 0.0, 1.0)
         
-        # 在潜在空间中插值
-        interpolated_images = []
-        for i in range(num_steps):
-            alpha = i / (num_steps - 1)
-            interpolated_latents = (1 - alpha) * latents1 + alpha * latents2
-            interpolated_image = self.decode_from_latent(interpolated_latents)
-            interpolated_images.append(interpolated_image)
+        return images
+    
+    def get_loss_dict(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """获取损失字典 (兼容训练循环)"""
+        images = batch['image']
+        class_labels = batch.get('label', None)
         
-        return torch.stack(interpolated_images)
-    
-    def get_latent_shape(self, image_size: int = 256) -> Tuple[int, int, int]:
-        """
-        获取给定图像尺寸对应的潜在空间形状
-        Args:
-            image_size: 图像尺寸
-        Returns:
-            (channels, height, width) 潜在空间形状
-        """
-        # 根据VAE的下采样比例计算
-        # 我们的VAE下采样了8倍 (256 -> 32)
-        latent_size = image_size // 8
-        return (self.unet.in_channels, latent_size, latent_size)
-    
-    def save_pretrained(self, save_path: str):
-        """保存模型"""
-        os.makedirs(save_path, exist_ok=True)
-        
-        # 只保存U-Net权重 (VAE保持冻结)
-        torch.save(self.unet.state_dict(), os.path.join(save_path, 'unet.pth'))
-        print(f"LDM模型已保存到: {save_path}")
-    
-    def load_pretrained(self, load_path: str):
-        """加载模型"""
-        unet_path = os.path.join(load_path, 'unet.pth')
-        if os.path.exists(unet_path):
-            self.unet.load_state_dict(torch.load(unet_path, map_location='cpu'))
-            print(f"LDM模型已从 {load_path} 加载")
-        else:
-            raise FileNotFoundError(f"找不到模型文件: {unet_path}")
+        return self(images, class_labels)
 
 
 class ClassifierFreeGuidance:
