@@ -25,25 +25,20 @@ class InceptionV3Features(nn.Module):
         super().__init__()
         
         # 加载预训练的InceptionV3
-        inception = models.inception_v3(pretrained=True, transform_input=False)
-        inception.eval()
-        
-        # 移除最后的分类层，保留特征提取部分
-        self.features = nn.Sequential(*list(inception.children())[:-1])
+        self.inception = models.inception_v3(pretrained=True, transform_input=False)
+        self.inception.eval()
         
         # 冻结参数
-        for param in self.features.parameters():
+        for param in self.inception.parameters():
             param.requires_grad = False
             
         self.device = device
         self.to(device)
         
         # 预处理：InceptionV3期望输入为[0,1]范围，299x299尺寸
-        self.preprocess = transforms.Compose([
-            transforms.Resize((299, 299)),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                               std=[0.229, 0.224, 0.225])
-        ])
+        # 注意：不在这里进行resize，因为transforms.Resize期望PIL图像
+        self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                           std=[0.229, 0.224, 0.225])
     
     def forward(self, x):
         """
@@ -53,17 +48,59 @@ class InceptionV3Features(nn.Module):
         Returns:
             features: [batch_size, 2048] 特征向量
         """
-        # 预处理
-        if x.size(-1) != 299:
+        # 调整图像尺寸到299x299
+        if x.size(-1) != 299 or x.size(-2) != 299:
             x = F.interpolate(x, size=(299, 299), mode='bilinear', align_corners=False)
         
-        # 标准化
-        x = self.preprocess(x)
+        # 应用ImageNet标准化
+        x = self.normalize(x)
         
-        # 提取特征
-        features = self.features(x)
-        features = F.adaptive_avg_pool2d(features, (1, 1))
-        features = features.view(features.size(0), -1)
+        # 自定义前向传播，跳过辅助分类器
+        # N x 3 x 299 x 299
+        x = self.inception.Conv2d_1a_3x3(x)
+        # N x 32 x 149 x 149
+        x = self.inception.Conv2d_2a_3x3(x)
+        # N x 32 x 147 x 147
+        x = self.inception.Conv2d_2b_3x3(x)
+        # N x 64 x 147 x 147
+        x = self.inception.maxpool1(x)
+        # N x 64 x 73 x 73
+        x = self.inception.Conv2d_3b_1x1(x)
+        # N x 80 x 73 x 73
+        x = self.inception.Conv2d_4a_3x3(x)
+        # N x 192 x 71 x 71
+        x = self.inception.maxpool2(x)
+        # N x 192 x 35 x 35
+        x = self.inception.Mixed_5b(x)
+        # N x 256 x 35 x 35
+        x = self.inception.Mixed_5c(x)
+        # N x 288 x 35 x 35
+        x = self.inception.Mixed_5d(x)
+        # N x 288 x 35 x 35
+        x = self.inception.Mixed_6a(x)
+        # N x 768 x 17 x 17
+        x = self.inception.Mixed_6b(x)
+        # N x 768 x 17 x 17
+        x = self.inception.Mixed_6c(x)
+        # N x 768 x 17 x 17
+        x = self.inception.Mixed_6d(x)
+        # N x 768 x 17 x 17
+        x = self.inception.Mixed_6e(x)
+        # N x 768 x 17 x 17
+        # 跳过 AuxLogits
+        x = self.inception.Mixed_7a(x)
+        # N x 1280 x 8 x 8
+        x = self.inception.Mixed_7b(x)
+        # N x 2048 x 8 x 8
+        x = self.inception.Mixed_7c(x)
+        # N x 2048 x 8 x 8
+        # Adaptive average pooling
+        x = self.inception.avgpool(x)
+        # N x 2048 x 1 x 1
+        
+        # 扁平化特征
+        features = x.view(x.size(0), -1)
+        # N x 2048
         
         return features
 
