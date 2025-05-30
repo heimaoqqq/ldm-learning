@@ -214,14 +214,24 @@ class AttentionBlock(nn.Module):
         super().__init__()
         self.channels = channels
 
+        # 🔧 动态调整注意力头数确保整除
+        self.num_heads = min(num_heads, channels // 32)  # 至少32个通道每头
+        if channels % self.num_heads != 0:
+            # 找到最大的能整除的头数
+            for h in range(self.num_heads, 0, -1):
+                if channels % h == 0:
+                    self.num_heads = h
+                    break
+            else:
+                self.num_heads = 1  # 最后fallback到1
+        
+        self.head_size = channels // self.num_heads
+
         self.norm = nn.GroupNorm(num_groups=num_groups, num_channels=channels, eps=1e-6, affine=True)
         
         # 🔧 预归一化和后归一化
         self.pre_norm = nn.GroupNorm(num_groups=num_groups, num_channels=channels, eps=1e-6, affine=True)
         self.post_norm = nn.GroupNorm(num_groups=num_groups, num_channels=channels, eps=1e-6, affine=True)
-
-        self.num_heads = num_heads
-        self.head_size = channels // num_heads
 
         # 交叉注意力
         encoder_hidden_states_channels = encoder_hidden_states_channels or channels
@@ -272,6 +282,9 @@ class AttentionBlock(nn.Module):
     def reshape_heads_to_batch_dim(self, tensor: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, dim = tensor.shape
         head_size = dim // self.num_heads
+        # 确保channels能被num_heads整除
+        if dim % self.num_heads != 0:
+            raise ValueError(f"channels ({dim}) must be divisible by num_heads ({self.num_heads})")
         tensor = tensor.reshape(batch_size, seq_len, self.num_heads, head_size)
         tensor = tensor.permute(0, 2, 1, 3).reshape(batch_size * self.num_heads, seq_len, head_size)
         return tensor
