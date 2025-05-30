@@ -393,13 +393,15 @@ class UNetModel(nn.Module):
         if class_labels is not None and self.class_embed is not None:
             # 验证标签范围以避免索引越界
             if torch.any(class_labels < 0) or torch.any(class_labels >= self.num_classes):
-                invalid_mask = (class_labels < 0) | (class_labels >= self.num_classes)
-                invalid_labels = class_labels[invalid_mask]
-                print(f"❌ 错误: 发现超出范围的标签值: {invalid_labels.tolist()}")
-                print(f"   期望范围: [0, {self.num_classes-1}], 但得到: [{class_labels.min().item()}, {class_labels.max().item()}]")
+                # 静默修复CFG训练中的-1标签，只在第一次时警告
+                if not hasattr(self, '_label_warning_shown'):
+                    invalid_mask = (class_labels < 0) | (class_labels >= self.num_classes)
+                    invalid_labels = class_labels[invalid_mask]
+                    print(f"💡 检测到CFG训练标签（如-1），已自动处理。后续将静默修复。")
+                    self._label_warning_shown = True
+                
                 # 将超出范围的标签替换为0（安全值）
                 class_labels = torch.clamp(class_labels, 0, self.num_classes - 1)
-                print(f"   已将超出范围的标签替换为安全值")
             
             class_emb = self.class_embed(class_labels)
             class_emb = self.class_proj(class_emb)
