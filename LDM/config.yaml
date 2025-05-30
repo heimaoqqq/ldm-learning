@@ -56,7 +56,7 @@ unet:
 # 训练配置
 training:
   epochs: 500
-  lr: 1e-4  # AdamW学习率
+  lr: 0.0001  # AdamW学习率 (使用小数格式而不是科学记数法)
   weight_decay: 0.01
   warmup_steps: 1000  # 学习率预热步数
   
