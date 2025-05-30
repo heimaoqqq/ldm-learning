@@ -14,8 +14,8 @@ vae:
 # 数据集配置
 dataset:
   root_dir: "/kaggle/input/dataset"  # Kaggle数据集路径
-  batch_size: 8  # 🔧 恢复到16获得更好的训练稳定性
-  num_workers: 2  # 保持4个workers获得好的数据加载速度
+  batch_size: 6  # 🎯 平衡点：保持合理batch size但避免OOM
+  num_workers: 2  # 保持2个workers减少CPU内存占用
   val_split: 0.2
   image_size: 256
 
@@ -32,38 +32,38 @@ unet:
   # 输入维度
   in_channels: 256  # 潜在空间通道数，与VAE的latent_dim一致
   out_channels: 256  # 输出通道数 (预测噪声)
-  model_channels: 192  # 🔧 恢复到192获得更强的表达能力
+  model_channels: 160  # 🎯 适中选择：介于128-192之间，保持表达能力
   
   # 时间嵌入
-  time_embed_dim: 768  # 🔧 恢复到768获得更丰富的时间表示
+  time_embed_dim: 640  # 🎯 适中选择：介于512-768之间，保持时间表示能力
   
   # 条件嵌入 (身份标签)
   num_classes: 31  # 类别数量 (ID_1到ID_31，共31个用户)
-  class_embed_dim: 384  # 🔧 恢复到384获得更好的条件控制
+  class_embed_dim: 320  # 🎯 适中选择：介于256-384之间，保持条件控制
   
   # 网络层配置
-  num_res_blocks: 3  # 🔧 保持3层获得更深的残差学习
-  attention_resolutions: [4, 8, 16]  # 🔧 保持多层注意力获得更细致的特征
-  channel_mult: [1, 2, 4, 8]  # 🔧 保持[1,2,4,8]获得更大的特征容量
-  num_heads: 12  # 🔧 恢复到12获得更强的注意力能力
+  num_res_blocks: 3  # 🎯 保持3层，这对质量很重要
+  attention_resolutions: [8, 16]  # 🎯 去掉最细粒度[4]，注意力很耗内存
+  channel_mult: [1, 2, 4, 6]  # 🎯 降低最后一层：[1,2,4,8]→[1,2,4,6]
+  num_heads: 10  # 🎯 适中选择：介于8-12之间，保持注意力能力
   use_scale_shift_norm: true  # 使用条件归一化
   dropout: 0.1  # Dropout率
   
   # 条件机制
-  use_cross_attention: true  # 🔧 恢复交叉注意力融合条件
-  use_self_attention: true   # 🔧 恢复自注意力
+  use_cross_attention: true  # 🎯 保持交叉注意力，这对条件生成很重要
+  use_self_attention: true   # 🎯 保持自注意力
 
 # 训练配置
 training:
   epochs: 500
-  lr: 0.00005  # 🔧 保持提高的学习率
+  lr: 0.00005  # 🎯 保持较高学习率
   weight_decay: 0.01
-  warmup_steps: 1000  # 🔧 保持快速预热
+  warmup_steps: 1000  # 🎯 保持预热步数
   
   # 保存设置
   save_dir: "ldm_models"
   save_interval: 50  # 每隔多少epoch保存一次
-  sample_interval: 10  # 每隔多少epoch生成样本
+  sample_interval: 15  # 🎯 略微降低采样频率节省内存
   log_interval: 100  # 每隔多少步打印日志
   
   # 损失权重
@@ -71,33 +71,33 @@ training:
   
   # Classifier-Free Guidance
   use_cfg: true  # 使用无分类器引导
-  cfg_dropout_prob: 0.2  # 🔧 保持强CFG训练
+  cfg_dropout_prob: 0.2  # 🎯 保持强CFG训练
   
   # 梯度裁剪
-  grad_clip_norm: 1.0  # 🔧 保持放宽的梯度裁剪
+  grad_clip_norm: 1.0  # 🎯 保持梯度裁剪
   
   # 调度器
   use_scheduler: true
-  scheduler_type: "cosine_with_restarts"  # 🔧 保持优化的调度器
+  scheduler_type: "cosine_with_restarts"  # 🎯 保持优化调度器
 
 # FID评估配置
 fid_evaluation:
-  enabled: true  # 🔧 保持FID评估监控质量
-  eval_interval: 5  # 🔧 恢复更频繁的评估 (每5个epoch)
-  num_samples: 300  # 🔧 恢复更多样本获得准确的FID
-  batch_size: 4  # 🔧 恢复到4获得更好的评估效率
-  max_real_samples: 1000  # 🔧 恢复更多真实样本
+  enabled: true  # 🎯 保持FID评估监控质量
+  eval_interval: 10  # 🎯 适中的评估频率
+  num_samples: 200  # 🎯 适中的样本数，平衡准确性和内存
+  batch_size: 3  # 🎯 降低到3，配合主训练batch_size
+  max_real_samples: 800  # 🎯 适中的真实样本数
   save_best_fid_model: true  # 保存最佳FID模型
 
 # 推理配置
 inference:
-  num_inference_steps: 50  # 🔧 恢复到50步获得更好的生成质量
+  num_inference_steps: 40  # 🎯 适中的推理步数，平衡质量和内存
   guidance_scale: 7.5  # CFG引导强度
   eta: 0.0  # DDIM参数 (0为确定性采样)
   
   # 采样配置
-  sample_batch_size: 4  # 🔧 恢复到4获得更好的生成效率
-  num_samples_per_class: 8  # 🔧 恢复到8获得更多样化的样本
+  sample_batch_size: 3  # 🎯 配合训练batch_size
+  num_samples_per_class: 6  # 🎯 适中的样本数量
   
   # 输出设置
   output_dir: "generated_samples"
@@ -105,7 +105,7 @@ inference:
 
 # 设备配置
 device: "auto"  # auto, cpu, cuda
-mixed_precision: true  # 🔧 启用混合精度训练节省内存
+mixed_precision: true  # 🎯 启用混合精度训练节省内存
 
 # 日志配置
 logging:
