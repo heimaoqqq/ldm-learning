@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import sys
 import os
 
-# 添加VAE模块路径
+# 在Kaggle环境中，VAE模块已复制到当前目录
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
 
 from adv_vq_vae import AdvVQVAE
