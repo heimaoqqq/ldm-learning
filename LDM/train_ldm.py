@@ -441,17 +441,17 @@ def train_ldm():
                     
                     val_loss += loss.item()
                     
-                    # 计算噪声预测指标 (暂时移除，因为输出格式已更改)
-                    # if 'predicted_noise' in outputs and 'target_noise' in outputs:
-                    #     batch_noise_metrics = diffusion_metrics.calculate_all_metrics(
-                    #         outputs['predicted_noise'], 
-                    #         outputs['target_noise']
-                    #     )
-                    #     
-                    #     # 累加指标
-                    #     for key in total_noise_metrics.keys():
-                    #         if key in batch_noise_metrics:
-                    #             total_noise_metrics[key] += batch_noise_metrics[key]
+                    # 计算噪声预测指标
+                    if 'predicted_noise' in outputs and 'target_noise' in outputs:
+                        batch_noise_metrics = diffusion_metrics.calculate_all_metrics(
+                            outputs['predicted_noise'], 
+                            outputs['target_noise']
+                        )
+                        
+                        # 累加指标
+                        for key in total_noise_metrics.keys():
+                            if key in batch_noise_metrics:
+                                total_noise_metrics[key] += batch_noise_metrics[key]
                     
                     val_steps += 1
             
