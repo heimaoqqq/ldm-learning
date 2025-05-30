@@ -91,7 +91,7 @@ fid_evaluation:
 
 # 推理配置
 inference:
-  num_inference_steps: 25  # 推理时的去噪步数 (从50减少到25以节省时间)
+  num_inference_steps: 200  # 推理时的去噪步数 (从50减少到25以节省时间)
   guidance_scale: 7.5  # CFG引导强度
   eta: 0.0  # DDIM参数 (0为确定性采样)
   
