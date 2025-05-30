@@ -259,20 +259,13 @@ def train_ldm():
                 'loss': f'{loss.item():.4f}',
                 'lr': f'{current_lr:.2e}'
             })
-            
-            # 定期打印日志
-            if global_step % config['training']['log_interval'] == 0:
-                print(f"Step {global_step}, Loss: {loss.item():.4f}, LR: {current_lr:.2e}")
         
         # 计算平均损失
         avg_epoch_loss = epoch_loss / len(train_loader)
         epoch_time = time.time() - epoch_start_time
         current_lr = optimizer.param_groups[0]['lr']
         
-        print(f"Epoch {epoch+1} 完成:")
-        print(f"  平均训练损失: {avg_epoch_loss:.4f}")
-        print(f"  用时: {epoch_time:.1f}s")
-        print(f"  学习率: {current_lr:.2e}")
+        print(f"\nEpoch {epoch+1}/{config['training']['epochs']} - Loss: {avg_epoch_loss:.4f} - Time: {epoch_time:.1f}s - LR: {current_lr:.2e}")
         
         # 验证
         avg_val_loss = None
@@ -327,11 +320,13 @@ def train_ldm():
                 for key in total_noise_metrics.keys():
                     noise_metrics_epoch[key] = total_noise_metrics[key] / val_steps
             
-            print(f"  验证损失: {avg_val_loss:.4f}")
+            # 整合验证结果到一行
             if noise_metrics_epoch:
-                print(f"  噪声MSE: {noise_metrics_epoch.get('noise_mse', 0):.6f}")
-                print(f"  噪声PSNR: {noise_metrics_epoch.get('noise_psnr', 0):.2f}")
-                print(f"  噪声余弦相似度: {noise_metrics_epoch.get('noise_cosine_similarity', 0):.4f}")
+                noise_mse = noise_metrics_epoch.get('noise_mse', 0)
+                noise_psnr = noise_metrics_epoch.get('noise_psnr', 0)
+                print(f"Val Loss: {avg_val_loss:.4f} | Noise MSE: {noise_mse:.6f} | PSNR: {noise_psnr:.2f}")
+            else:
+                print(f"Val Loss: {avg_val_loss:.4f}")
         else:
             avg_val_loss = avg_epoch_loss
         
@@ -339,7 +334,7 @@ def train_ldm():
         fid_score = None
         inception_score = None
         if (epoch + 1) % 10 == 0:
-            print(f"  计算FID分数和IS分数...")
+            print(f"计算评估指标...")
             try:
                 fid_start_time = time.time()
                 fid_score = fid_evaluator.evaluate_model(
@@ -349,7 +344,9 @@ def train_ldm():
                     num_classes=config['unet']['num_classes']
                 )
                 fid_time = time.time() - fid_start_time
-                print(f"  FID分数: {fid_score:.2f} (用时: {fid_time:.1f}s)")
+                
+                # 计算IS分数（简化输出）
+                is_start_time = time.time()
                 
                 # 计算IS分数
                 print(f"  计算IS分数...")
@@ -386,19 +383,18 @@ def train_ldm():
                         inception_score = {'mean': is_mean, 'std': is_std}
                         
                         is_time = time.time() - is_start_time
-                        print(f"  IS分数: {is_mean:.2f}±{is_std:.2f} (用时: {is_time:.1f}s)")
+                        total_eval_time = fid_time + is_time
+                        print(f"FID: {fid_score:.2f} | IS: {is_mean:.2f}±{is_std:.2f} | Time: {total_eval_time:.1f}s")
                 
                 # 更新最佳FID
                 if fid_score < best_fid:
                     best_fid = fid_score
                     best_fid_model_path = os.path.join(save_dir, 'best_fid_model')
                     model.save_pretrained(best_fid_model_path)
-                    print(f"  🎉 FID新纪录！保存最佳FID模型: {best_fid_model_path}")
+                    print(f"🎉 新纪录！FID: {best_fid:.2f}")
                 
             except Exception as e:
-                print(f"  ⚠️ 指标计算失败: {e}")
-                fid_score = None
-                inception_score = None
+                print(f"⚠️ 指标计算失败: {e}")
         
         # 记录训练日志
         training_log['epochs'].append(epoch + 1)
