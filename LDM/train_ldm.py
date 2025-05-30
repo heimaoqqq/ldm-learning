@@ -178,6 +178,21 @@ def train_ldm():
         cfg_dropout_prob=config['training']['cfg_dropout_prob'],
     ).to(device)
     
+    # 检查模型权重健康状况
+    print("🔍 检查模型权重...")
+    total_params = 0
+    healthy_params = 0
+    for name, param in model.unet.named_parameters():
+        total_params += param.numel()
+        if torch.any(torch.isnan(param)) or torch.any(torch.isinf(param)):
+            print(f"⚠️ 参数 {name} 包含异常值")
+            # 重新初始化异常参数
+            nn.init.xavier_uniform_(param)
+        else:
+            healthy_params += param.numel()
+    
+    print(f"✅ 模型权重检查完成: {healthy_params}/{total_params} 参数正常")
+    
     # 初始化FID评估器
     print("初始化FID评估器...")
     fid_evaluator = FIDEvaluator(device=device)
@@ -215,9 +230,6 @@ def train_ldm():
         )
     else:
         scheduler = None
-    
-    # 混合精度训练
-    scaler = torch.cuda.amp.GradScaler() if config.get('mixed_precision', False) and device.type == 'cuda' else None
     
     # 训练状态和日志
     start_epoch = 0
@@ -258,13 +270,8 @@ def train_ldm():
                     continue
                 
                 # 前向传播
-                if scaler is not None:
-                    with torch.cuda.amp.autocast():
-                        outputs = model(images, class_labels=labels)
-                        loss = outputs['loss']
-                else:
-                    outputs = model(images, class_labels=labels)
-                    loss = outputs['loss']
+                outputs = model(images, class_labels=labels)
+                loss = outputs['loss']
                 
                 # 检查损失
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -283,88 +290,45 @@ def train_ldm():
                 
                 # 反向传播
                 optimizer.zero_grad()
-                if scaler is not None:
-                    scaler.scale(loss).backward()
+                loss.backward()
+                
+                # 检查梯度健康
+                total_norm = 0
+                gradient_healthy = True
+                for p in model.unet.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        if torch.isnan(param_norm) or torch.isinf(param_norm):
+                            print(f"⚠️ 检测到异常梯度，跳过更新")
+                            gradient_healthy = False
+                            break
+                        total_norm += param_norm.item() ** 2
+                
+                if gradient_healthy:
+                    total_norm = total_norm ** (1. / 2)
                     
-                    # 检查梯度健康
-                    scaler.unscale_(optimizer)
-                    total_norm = 0
-                    gradient_healthy = True
-                    for p in model.unet.parameters():
-                        if p.grad is not None:
-                            param_norm = p.grad.data.norm(2)
-                            if torch.isnan(param_norm) or torch.isinf(param_norm):
-                                print(f"⚠️ 检测到异常梯度，跳过更新")
-                                gradient_healthy = False
-                                break
-                            total_norm += param_norm.item() ** 2
+                    # 梯度裁剪
+                    if config['training']['grad_clip_norm'] > 0:
+                        torch.nn.utils.clip_grad_norm_(model.unet.parameters(), config['training']['grad_clip_norm'])
                     
-                    if gradient_healthy:
-                        total_norm = total_norm ** (1. / 2)
-                        
-                        # 梯度裁剪
-                        if config['training']['grad_clip_norm'] > 0:
-                            torch.nn.utils.clip_grad_norm_(model.unet.parameters(), config['training']['grad_clip_norm'])
-                        
-                        scaler.step(optimizer)
-                        scaler.update()
-                        
-                        # 更新学习率
-                        if scheduler is not None:
-                            scheduler.step()
-                        
-                        # 记录损失
-                        epoch_loss += loss.item()
-                        valid_batches += 1
-                        global_step += 1
-                        
-                        # 更新进度条
-                        current_lr = optimizer.param_groups[0]['lr']
-                        progress_bar.set_postfix({
-                            'loss': f'{loss.item():.4f}',
-                            'lr': f'{current_lr:.2e}',
-                            'grad_norm': f'{total_norm:.2f}'
-                        })
-                else:
-                    loss.backward()
+                    optimizer.step()
                     
-                    # 检查梯度健康
-                    total_norm = 0
-                    gradient_healthy = True
-                    for p in model.unet.parameters():
-                        if p.grad is not None:
-                            param_norm = p.grad.data.norm(2)
-                            if torch.isnan(param_norm) or torch.isinf(param_norm):
-                                print(f"⚠️ 检测到异常梯度，跳过更新")
-                                gradient_healthy = False
-                                break
-                            total_norm += param_norm.item() ** 2
+                    # 更新学习率
+                    if scheduler is not None:
+                        scheduler.step()
                     
-                    if gradient_healthy:
-                        total_norm = total_norm ** (1. / 2)
-                        
-                        # 梯度裁剪
-                        if config['training']['grad_clip_norm'] > 0:
-                            torch.nn.utils.clip_grad_norm_(model.unet.parameters(), config['training']['grad_clip_norm'])
-                        
-                        optimizer.step()
-                        
-                        # 更新学习率
-                        if scheduler is not None:
-                            scheduler.step()
-                        
-                        # 记录损失
-                        epoch_loss += loss.item()
-                        valid_batches += 1
-                        global_step += 1
-                        
-                        # 更新进度条
-                        current_lr = optimizer.param_groups[0]['lr']
-                        progress_bar.set_postfix({
-                            'loss': f'{loss.item():.4f}',
-                            'lr': f'{current_lr:.2e}',
-                            'grad_norm': f'{total_norm:.2f}'
-                        })
+                    # 记录损失
+                    epoch_loss += loss.item()
+                    valid_batches += 1
+                    global_step += 1
+                    
+                    # 更新进度条
+                    current_lr = optimizer.param_groups[0]['lr']
+                    progress_bar.set_postfix({
+                        'loss': f'{loss.item():.4f}',
+                        'lr': f'{current_lr:.2e}',
+                        'grad_norm': f'{total_norm:.2f}'
+                    })
             
             except Exception as e:
                 print(f"❌ 批次 {batch_idx} 出错: {e}")
@@ -404,13 +368,8 @@ def train_ldm():
                     images = images.to(device)
                     labels = labels.to(device)
                     
-                    if scaler is not None:
-                        with torch.cuda.amp.autocast():
-                            outputs = model(images, class_labels=labels)
-                            loss = outputs['loss']
-                    else:
-                        outputs = model(images, class_labels=labels)
-                        loss = outputs['loss']
+                    outputs = model(images, class_labels=labels)
+                    loss = outputs['loss']
                     
                     val_loss += loss.item()
                     
