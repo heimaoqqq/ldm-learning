@@ -143,6 +143,31 @@ def save_sample_images(model, device, config, epoch, save_dir):
             vutils.save_image(grid, save_path)
             print(f"样本图像已保存: {save_path}")
 
+def save_model_checkpoint(model, save_path, epoch=None, extra_info=None):
+    """保存模型检查点的统一函数"""
+    os.makedirs(save_path, exist_ok=True)
+    
+    # 保存模型权重
+    model_path = os.path.join(save_path, 'model.pth')
+    torch.save(model.state_dict(), model_path)
+    
+    # 保存模型配置和额外信息
+    checkpoint_info = {
+        'model_type': 'LatentDiffusionModel',
+        'epoch': epoch,
+        'model_path': model_path,
+        'timestamp': time.time()
+    }
+    
+    if extra_info:
+        checkpoint_info.update(extra_info)
+    
+    info_path = os.path.join(save_path, 'checkpoint_info.json')
+    with open(info_path, 'w') as f:
+        json.dump(checkpoint_info, f, indent=2)
+    
+    return model_path
+
 def train_ldm():
     """LDM训练主函数"""
     
@@ -507,7 +532,12 @@ def train_ldm():
                 if fid_score < best_fid:
                     best_fid = fid_score
                     best_fid_model_path = os.path.join(save_dir, 'best_fid_model')
-                    model.save_pretrained(best_fid_model_path)
+                    save_model_checkpoint(
+                        model, 
+                        best_fid_model_path, 
+                        epoch=epoch+1, 
+                        extra_info={'fid_score': fid_score, 'best_fid': True}
+                    )
                     print(f"🎉 新纪录！FID: {best_fid:.2f}")
                 
             except Exception as e:
@@ -530,13 +560,23 @@ def train_ldm():
         if avg_val_loss < best_loss:
             best_loss = avg_val_loss
             best_model_path = os.path.join(save_dir, 'best_loss_model')
-            model.save_pretrained(best_model_path)
+            save_model_checkpoint(
+                model, 
+                best_model_path, 
+                epoch=epoch+1, 
+                extra_info={'val_loss': best_loss, 'best_loss': True}
+            )
             print(f"🎉 新最佳损失: {best_loss:.4f}")
         
         # 定期保存checkpoint
         if (epoch + 1) % config['training']['save_interval'] == 0:
             checkpoint_path = os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}')
-            model.save_pretrained(checkpoint_path)
+            save_model_checkpoint(
+                model, 
+                checkpoint_path, 
+                epoch=epoch+1, 
+                extra_info={'train_loss': avg_epoch_loss, 'val_loss': avg_val_loss}
+            )
             print(f"💾 保存checkpoint: {checkpoint_path}")
         
         # 生成样本图像
@@ -553,7 +593,17 @@ def train_ldm():
     
     # 保存最终模型
     final_model_path = os.path.join(save_dir, 'final_model')
-    model.save_pretrained(final_model_path)
+    save_model_checkpoint(
+        model, 
+        final_model_path, 
+        epoch=config['training']['epochs'], 
+        extra_info={
+            'final_train_loss': avg_epoch_loss,
+            'final_val_loss': avg_val_loss,
+            'best_fid': best_fid if best_fid != float('inf') else None,
+            'training_completed': True
+        }
+    )
     
     # 保存最终训练报告
     final_report = {
