@@ -17,7 +17,7 @@ import json
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
 
 from ldm import LatentDiffusionModel
-# 直接从VAE目录导入dataset功能
+# 从VAE目录导入dataset功能
 from dataset import build_dataloader
 from fid_evaluation import FIDEvaluator
 from metrics import DiffusionMetrics, denormalize_for_metrics
@@ -70,6 +70,38 @@ def get_cosine_schedule_with_warmup(
             return float(current_step) / float(max(1, num_warmup_steps))
         progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
         return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
+
+def get_cosine_schedule_with_restarts(
+    optimizer: torch.optim.Optimizer,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    num_cycles: int = 3,  # 🔧 重启次数
+    restart_decay: float = 0.8,  # 🔧 每次重启的学习率衰减
+    last_epoch: int = -1,
+):
+    """
+    🔧 创建带重启的余弦学习率调度器 - 更强的学习能力
+    """
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        
+        # 计算当前在第几个周期
+        cycle_length = 1.0 / num_cycles
+        current_cycle = int(progress / cycle_length)
+        cycle_progress = (progress % cycle_length) / cycle_length
+        
+        # 每次重启时降低基础学习率
+        base_lr = restart_decay ** current_cycle
+        
+        # 余弦衰减
+        cosine_factor = 0.5 * (1.0 + math.cos(math.pi * cycle_progress))
+        
+        return max(0.0, base_lr * cosine_factor)
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
 
@@ -223,11 +255,26 @@ def train_ldm():
     # 学习率调度器
     if config['training']['use_scheduler']:
         total_steps = len(train_loader) * config['training']['epochs']
-        scheduler = get_cosine_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=config['training']['warmup_steps'],
-            num_training_steps=total_steps,
-        )
+        
+        # 🔧 根据配置选择调度器类型
+        scheduler_type = config['training'].get('scheduler_type', 'cosine')
+        
+        if scheduler_type == "cosine_with_restarts":
+            print(f"📈 使用带重启的余弦学习率调度器")
+            scheduler = get_cosine_schedule_with_restarts(
+                optimizer,
+                num_warmup_steps=config['training']['warmup_steps'],
+                num_training_steps=total_steps,
+                num_cycles=3,  # 3次重启周期
+                restart_decay=0.8,  # 每次重启衰减到80%
+            )
+        else:
+            print(f"📈 使用标准余弦学习率调度器")
+            scheduler = get_cosine_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps=config['training']['warmup_steps'],
+                num_training_steps=total_steps,
+            )
     else:
         scheduler = None
     
