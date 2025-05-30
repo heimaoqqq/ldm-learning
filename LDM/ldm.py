@@ -131,7 +131,9 @@ class LatentDiffusionModel(nn.Module):
         
         return {
             'noise_loss': noise_loss,
-            'total_loss': noise_loss
+            'total_loss': noise_loss,
+            'predicted_noise': predicted_noise,
+            'target_noise': noise
         }
     
     @torch.no_grad()
