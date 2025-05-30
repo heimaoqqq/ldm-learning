@@ -141,21 +141,21 @@ def build_dataloader(root_dir, batch_size=8, num_workers=2, shuffle_train=True, 
                     print(f"警告: 类别ID {class_id+1} 超出范围(1-31)，跳过文件: {filename}")
                     skipped_files += 1
                     continue
-                    
+                
             except (ValueError, IndexError) as e:
                 print(f"警告: 无法从文件名 {filename} 解析 class_id ({e})。跳过此文件。")
                 skipped_files += 1
                 continue
-        
-        # 移除跳过的文件
-        if skipped_files > 0:
-            valid_indices = []
-            for i, img_path in enumerate(all_image_paths):
-                if i < len(all_class_ids):
-                    valid_indices.append(i)
             
-            all_image_paths = [all_image_paths[i] for i in valid_indices if i < len(all_class_ids)]
-            print(f"跳过了 {skipped_files} 个无法解析的文件")
+            # 移除跳过的文件
+            if skipped_files > 0:
+                valid_indices = []
+                for i, img_path in enumerate(all_image_paths):
+                    if i < len(all_class_ids):
+                        valid_indices.append(i)
+                
+                all_image_paths = [all_image_paths[i] for i in valid_indices if i < len(all_class_ids)]
+                print(f"跳过了 {skipped_files} 个无法解析的文件")
 
     if not all_image_paths or len(all_image_paths) != len(all_class_ids):
         raise ValueError(f"在目录 {root_dir} 中解析后没有有效的图片文件")
