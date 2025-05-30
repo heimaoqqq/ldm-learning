@@ -193,18 +193,18 @@ def train_ldm():
     
     print(f"✅ 模型权重检查完成: {healthy_params}/{total_params} 参数正常")
     
-    # 初始化FID评估器
-    print("初始化FID评估器...")
-    fid_evaluator = FIDEvaluator(device=device)
-    
     # 初始化扩散指标计算器
     print("初始化扩散指标计算器...")
     diffusion_metrics = DiffusionMetrics(device=device)
     
-    # 计算真实数据特征（用于FID计算）
-    # 使用验证集来计算真实数据特征，减少计算开销
-    print("计算真实数据特征用于FID评估...")
-    fid_evaluator.compute_real_features(val_loader, max_samples=1000)
+    # 只有启用FID评估时才初始化
+    fid_evaluator = None
+    if config['fid_evaluation']['enabled']:
+        print("初始化FID评估器...")
+        fid_evaluator = FIDEvaluator(device=device)
+        # 计算真实数据特征
+        print("计算真实数据特征用于FID评估...")
+        fid_evaluator.compute_real_features(val_loader, max_samples=1000)
     
     # 确保数值类型正确
     learning_rate = float(config['training']['lr'])
@@ -407,7 +407,7 @@ def train_ldm():
         # FID评估 - 每10个epoch计算一次
         fid_score = None
         inception_score = None
-        if (epoch + 1) % 10 == 0:
+        if fid_evaluator and (epoch + 1) % 10 == 0:
             print(f"计算评估指标...")
             try:
                 fid_start_time = time.time()
