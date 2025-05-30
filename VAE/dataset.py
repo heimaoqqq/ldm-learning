@@ -20,6 +20,12 @@ class GaitDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         label = self.class_ids[idx]
+        
+        # 添加标签范围验证（防御性编程）
+        if label < 0 or label > 30:  # 应该在0-30范围内
+            print(f"⚠️ 警告: 标签 {label} 超出范围 [0, 30]，来自文件: {img_path}")
+            label = max(0, min(30, label))  # 强制限制在有效范围内
+        
         return image, label
 
 def build_dataloader(root_dir, batch_size=8, num_workers=2, shuffle_train=True, shuffle_val=False, val_split=0.3, random_state=42):
