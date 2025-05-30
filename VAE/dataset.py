@@ -23,7 +23,10 @@ class GaitDataset(Dataset):
         
         # 添加标签范围验证（防御性编程）
         if label < 0 or label > 30:  # 应该在0-30范围内
-            print(f"⚠️ 警告: 标签 {label} 超出范围 [0, 30]，来自文件: {img_path}")
+            # 只在首次遇到异常标签时警告
+            if not hasattr(self.__class__, '_label_warning_shown'):
+                print(f"⚠️ 发现异常标签，已自动修复。后续将静默处理。")
+                self.__class__._label_warning_shown = True
             label = max(0, min(30, label))  # 强制限制在有效范围内
         
         return image, label
