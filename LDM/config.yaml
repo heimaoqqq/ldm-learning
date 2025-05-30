@@ -56,7 +56,7 @@ unet:
 # 训练配置
 training:
   epochs: 500
-  lr: 0.00001  # 进一步降低学习率 (从0.00002降到0.00001)
+  lr: 0.000005  # 进一步降低学习率 (从0.00001降到0.000005)
   weight_decay: 0.01
   warmup_steps: 2000  # 增加预热步数
   
@@ -82,7 +82,7 @@ training:
 
 # FID评估配置
 fid_evaluation:
-  enabled: true  # 是否启用FID评估
+  enabled: false  # 暂时禁用FID评估，专注训练稳定性
   eval_interval: 10  # 每隔多少epoch进行FID评估
   num_samples: 500  # FID评估时的生成样本数
   batch_size: 4  # FID评估时的批量大小
@@ -105,7 +105,7 @@ inference:
 
 # 设备配置
 device: "auto"  # auto, cpu, cuda
-mixed_precision: true  # 使用混合精度训练
+mixed_precision: false  # 关闭混合精度训练避免数值问题
 
 # 日志配置
 logging:
