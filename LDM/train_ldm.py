@@ -200,15 +200,10 @@ def train_ldm():
     
     print(f"✓ 发现VAE权重文件: {vae_path}")
     
-    model = LatentDiffusionModel(
-        vae_config=config['vae'],
-        unet_config=config['unet'],
-        scheduler_config=config['diffusion'],
-        vae_path=vae_path,
-        freeze_vae=config['vae']['freeze'],
-        use_cfg=config['training']['use_cfg'],
-        cfg_dropout_prob=config['training']['cfg_dropout_prob'],
-    ).to(device)
+    # 🔧 更新VAE配置中的模型路径
+    config['vae']['model_path'] = vae_path
+    
+    model = LatentDiffusionModel(config).to(device)
     
     # 检查模型权重健康状况
     print("🔍 检查模型权重...")
@@ -318,14 +313,15 @@ def train_ldm():
                 
                 # 前向传播
                 outputs = model(images, class_labels=labels)
-                loss = outputs['loss']
+                loss = outputs['total_loss']  # 使用新的损失键名
                 
                 # 检查损失
                 if torch.isnan(loss) or torch.isinf(loss):
                     print(f"❌ 批次 {batch_idx} 损失异常: {loss.item()}")
-                    # 尝试用安全损失替代
-                    if 'predicted_noise' in outputs and 'target_noise' in outputs:
-                        loss = safe_mse_loss(outputs['predicted_noise'], outputs['target_noise'], "替代损失")
+                    # 尝试使用噪声损失作为备选
+                    if 'noise_loss' in outputs:
+                        loss = outputs['noise_loss']
+                        print(f"  使用噪声损失: {loss.item():.4f}")
                     else:
                         print(f"跳过批次 {batch_idx}")
                         continue
@@ -416,21 +412,21 @@ def train_ldm():
                     labels = labels.to(device)
                     
                     outputs = model(images, class_labels=labels)
-                    loss = outputs['loss']
+                    loss = outputs['total_loss']  # 使用新的损失键名
                     
                     val_loss += loss.item()
                     
-                    # 计算噪声预测指标
-                    if 'predicted_noise' in outputs and 'target_noise' in outputs:
-                        batch_noise_metrics = diffusion_metrics.calculate_all_metrics(
-                            outputs['predicted_noise'], 
-                            outputs['target_noise']
-                        )
-                        
-                        # 累加指标
-                        for key in total_noise_metrics.keys():
-                            if key in batch_noise_metrics:
-                                total_noise_metrics[key] += batch_noise_metrics[key]
+                    # 计算噪声预测指标 (暂时移除，因为输出格式已更改)
+                    # if 'predicted_noise' in outputs and 'target_noise' in outputs:
+                    #     batch_noise_metrics = diffusion_metrics.calculate_all_metrics(
+                    #         outputs['predicted_noise'], 
+                    #         outputs['target_noise']
+                    #     )
+                    #     
+                    #     # 累加指标
+                    #     for key in total_noise_metrics.keys():
+                    #         if key in batch_noise_metrics:
+                    #             total_noise_metrics[key] += batch_noise_metrics[key]
                     
                     val_steps += 1
             
@@ -485,7 +481,7 @@ def train_ldm():
                         class_labels = torch.randint(0, config['unet']['num_classes'], 
                                                     (batch_size,), device=device)
                         
-                        generated_batch = model.generate(
+                        generated_batch = model.sample(
                             batch_size=batch_size,
                             class_labels=class_labels,
                             num_inference_steps=20,  # 较少步数以节省时间
