@@ -36,7 +36,7 @@ class LatentDiffusionModel(nn.Module):
             num_train_timesteps=config['diffusion']['timesteps'],
             beta_start=config['diffusion']['beta_start'],
             beta_end=config['diffusion']['beta_end'],
-            schedule_type=config['diffusion']['noise_schedule']
+            beta_schedule=config['diffusion']['noise_schedule']
         )
         
         # 初始化U-Net
@@ -201,7 +201,8 @@ class LatentDiffusionModel(nn.Module):
                 noise_pred = self.unet(latents, t_batch, class_labels)
             
             # DDIM步骤
-            latents = self.scheduler.step(noise_pred, t, latents, eta=eta)
+            result = self.scheduler.step(noise_pred, t, latents)
+            latents = result.prev_sample if hasattr(result, 'prev_sample') else result[0]
         
         # 解码到图像空间
         images = self.decode_from_latent(latents)
