@@ -14,6 +14,7 @@ from typing import Dict, Any, List, Optional
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
 
 from ldm import LatentDiffusionModel
+# 直接从VAE目录导入dataset功能
 from dataset import build_dataloader
 
 def denormalize(x):
