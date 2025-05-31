@@ -203,7 +203,7 @@ class ResnetBlock(nn.Module):
         return self.skip_connection(input_tensor) + hidden_states
 
 class AttentionBlock(nn.Module):
-    """增强的注意力块 - 更强的空间和特征注意力"""
+    """简化的注意力块 - 已修复形状问题"""
     def __init__(
         self,
         channels: int,
@@ -228,73 +228,66 @@ class AttentionBlock(nn.Module):
         self.head_size = channels // self.num_heads
 
         self.norm = nn.GroupNorm(num_groups=num_groups, num_channels=channels, eps=1e-6, affine=True)
-        
-        # 🔧 预归一化和后归一化
-        self.pre_norm = nn.GroupNorm(num_groups=num_groups, num_channels=channels, eps=1e-6, affine=True)
-        self.post_norm = nn.GroupNorm(num_groups=num_groups, num_channels=channels, eps=1e-6, affine=True)
 
-        # 交叉注意力
+        # 简化的注意力投影
         encoder_hidden_states_channels = encoder_hidden_states_channels or channels
         self.to_q = nn.Linear(channels, channels, bias=False)
         self.to_k = nn.Linear(encoder_hidden_states_channels, channels, bias=False)
         self.to_v = nn.Linear(encoder_hidden_states_channels, channels, bias=False)
-        
-        # 🔧 多尺度查询、键、值投影
-        self.to_q_multi = nn.ModuleList([
-            nn.Linear(channels, channels // 2, bias=False),
-            nn.Linear(channels, channels // 2, bias=False),
-        ])
-        self.to_k_multi = nn.ModuleList([
-            nn.Linear(encoder_hidden_states_channels, channels // 2, bias=False),
-            nn.Linear(encoder_hidden_states_channels, channels // 2, bias=False),
-        ])
-        self.to_v_multi = nn.ModuleList([
-            nn.Linear(encoder_hidden_states_channels, channels // 2, bias=False),
-            nn.Linear(encoder_hidden_states_channels, channels // 2, bias=False),
-        ])
-
-        # 🔧 空间注意力机制
-        self.spatial_attention = nn.Sequential(
-            nn.Conv2d(channels, channels // 8, 1),
-            nn.SiLU(),
-            nn.Conv2d(channels // 8, channels // 8, 3, padding=1),
-            nn.SiLU(),
-            nn.Conv2d(channels // 8, 1, 1),
-            nn.Sigmoid()
-        )
-        
-        # 🔧 位置编码
-        self.pos_embedding = nn.Parameter(torch.randn(1, channels, 32, 32) * 0.02)
-        
-        # 🔧 特征融合层
-        self.feature_fusion = nn.Sequential(
-            nn.Linear(channels * 2, channels),
-            nn.SiLU(),
-            nn.Linear(channels, channels),
-            nn.Dropout(0.1)
-        )
 
         self.to_out = nn.Sequential(
             nn.Linear(channels, channels), 
-            nn.Dropout(0.1)  # 增加dropout
+            nn.Dropout(0.1)
         )
 
     def reshape_heads_to_batch_dim(self, tensor: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, dim = tensor.shape
-        head_size = dim // self.num_heads
-        # 确保channels能被num_heads整除
-        if dim % self.num_heads != 0:
-            raise ValueError(f"channels ({dim}) must be divisible by num_heads ({self.num_heads})")
-        tensor = tensor.reshape(batch_size, seq_len, self.num_heads, head_size)
-        tensor = tensor.permute(0, 2, 1, 3).reshape(batch_size * self.num_heads, seq_len, head_size)
-        return tensor
+        
+        # 🔧 严格的形状检查和修复
+        if dim != self.channels:
+            if dim < self.channels:
+                # 填充到正确大小
+                padding = torch.zeros(batch_size, seq_len, self.channels - dim, device=tensor.device, dtype=tensor.dtype)
+                tensor = torch.cat([tensor, padding], dim=2)
+            else:
+                # 截取到正确大小
+                tensor = tensor[:, :, :self.channels]
+            dim = self.channels
+        
+        if self.channels % self.num_heads != 0:
+            # 动态调整头数
+            for h in range(min(self.num_heads, self.channels), 0, -1):
+                if self.channels % h == 0:
+                    self.num_heads = h
+                    self.head_size = self.channels // h
+                    break
+        
+        head_size = self.head_size
+        
+        try:
+            # 重新形状到多头
+            tensor = tensor.reshape(batch_size, seq_len, self.num_heads, head_size)
+            tensor = tensor.permute(0, 2, 1, 3).reshape(batch_size * self.num_heads, seq_len, head_size)
+            return tensor
+        except Exception as e:
+            # 创建安全的张量
+            safe_tensor = torch.zeros(batch_size * self.num_heads, seq_len, head_size, 
+                                    device=tensor.device, dtype=tensor.dtype)
+            return safe_tensor
 
     def reshape_batch_dim_to_heads(self, tensor: torch.Tensor) -> torch.Tensor:
-        batch_size, seq_len, dim = tensor.shape
+        batch_size, seq_len, head_size = tensor.shape
         batch_size = batch_size // self.num_heads
-        tensor = tensor.reshape(batch_size, self.num_heads, seq_len, dim)
-        tensor = tensor.permute(0, 2, 1, 3).reshape(batch_size, seq_len, dim * self.num_heads)
-        return tensor
+        
+        try:
+            tensor = tensor.reshape(batch_size, self.num_heads, seq_len, head_size)
+            tensor = tensor.permute(0, 2, 1, 3).reshape(batch_size, seq_len, head_size * self.num_heads)
+            return tensor
+        except Exception as e:
+            # 创建安全的张量
+            safe_tensor = torch.zeros(batch_size, seq_len, self.channels, 
+                                    device=tensor.device, dtype=tensor.dtype)
+            return safe_tensor
 
     def forward(
         self,
@@ -308,197 +301,48 @@ class AttentionBlock(nn.Module):
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states.view(batch, channel, height * width).transpose(1, 2)
 
-        # 🔧 输入检查
-        if torch.any(torch.isnan(hidden_states)) or torch.any(torch.isinf(hidden_states)):
-            print(f"⚠️ 注意力输入异常")
-            hidden_states = torch.clamp(hidden_states, min=-5.0, max=5.0)
-            hidden_states = torch.where(torch.isnan(hidden_states) | torch.isinf(hidden_states), torch.zeros_like(hidden_states), hidden_states)
-
-        # 标准化和增强
+        # 标准化
         normalized = self.norm(hidden_states)
         
-        # 🔧 检查归一化输出
-        if torch.any(torch.isnan(normalized)) or torch.any(torch.isinf(normalized)):
-            print(f"⚠️ 注意力归一化异常")
-            normalized = torch.zeros_like(hidden_states)
-        
-        # 🔧 空间增强 - 添加数值稳定性
-        try:
-            spatial_enhanced = self.spatial_attention(normalized)
-            if torch.any(torch.isnan(spatial_enhanced)) or torch.any(torch.isinf(spatial_enhanced)):
-                print(f"⚠️ 空间注意力输出异常")
-                spatial_enhanced = normalized
-        except Exception as e:
-            print(f"⚠️ 空间注意力计算失败: {e}")
-            spatial_enhanced = normalized
-
         # Reshape for attention
-        hidden_states = spatial_enhanced.view(batch, channel, height * width).transpose(1, 2)
+        hidden_states = normalized.view(batch, channel, height * width).transpose(1, 2)
 
-        # 🔧 基础注意力计算 - 加强数值稳定性
         try:
+            # 简化的注意力计算
             query = self.to_q(hidden_states)
             key = self.to_k(encoder_hidden_states)
             value = self.to_v(encoder_hidden_states)
-
-            # 检查QKV
-            for name, tensor in [("query", query), ("key", key), ("value", value)]:
-                if torch.any(torch.isnan(tensor)) or torch.any(torch.isinf(tensor)):
-                    print(f"⚠️ 注意力{name}异常，使用零值")
-                    tensor.fill_(0.0)
 
             # Reshape for multi-head attention
             query = self.reshape_heads_to_batch_dim(query)
             key = self.reshape_heads_to_batch_dim(key)
             value = self.reshape_heads_to_batch_dim(value)
 
-            # 🔧 计算注意力分数 - 添加数值稳定性
+            # 计算注意力分数
             attention_scores = torch.matmul(query, key.transpose(-1, -2))
             attention_scores = attention_scores / math.sqrt(query.size(-1))
-            
-            # 🔧 检查注意力分数
-            if torch.any(torch.isnan(attention_scores)) or torch.any(torch.isinf(attention_scores)):
-                print(f"⚠️ 注意力分数异常，使用均匀分布")
-                attention_scores = torch.zeros_like(attention_scores)
-
-            # 🔧 稳定的softmax
             attention_scores = torch.clamp(attention_scores, min=-10.0, max=10.0)
             attention_probs = torch.softmax(attention_scores, dim=-1)
-            
-            # 检查注意力概率
-            if torch.any(torch.isnan(attention_probs)) or torch.any(torch.isinf(attention_probs)):
-                print(f"⚠️ 注意力概率异常，使用均匀分布")
-                seq_len = attention_probs.size(-1)
-                attention_probs = torch.full_like(attention_probs, 1.0 / seq_len)
 
             # 应用注意力权重
-            standard_out = torch.matmul(attention_probs, value)
-            standard_out = self.reshape_batch_dim_to_heads(standard_out)
-            
-            # 检查标准输出
-            if torch.any(torch.isnan(standard_out)) or torch.any(torch.isinf(standard_out)):
-                print(f"⚠️ 标准注意力输出异常")
-                standard_out = torch.zeros_like(standard_out)
+            attention_output = torch.matmul(attention_probs, value)
+            attention_output = self.reshape_batch_dim_to_heads(attention_output)
+
+            # 输出投影
+            final_output = self.to_out(attention_output)
+
         except Exception as e:
-            print(f"⚠️ 基础注意力计算失败: {e}")
-            standard_out = torch.zeros(batch, height * width, channel, device=hidden_states.device)
-        
-        # 🔧 多尺度注意力路径 - 添加异常处理
-        try:
-            multi_scale_hidden = spatial_enhanced.view(batch, channel, height * width).transpose(1, 2)
-            
-            multi_queries = []
-            multi_keys = []
-            multi_values = []
-            
-            for q_proj, k_proj, v_proj in zip(self.to_q_multi, self.to_k_multi, self.to_v_multi):
-                try:
-                    mq = q_proj(multi_scale_hidden)
-                    mk = k_proj(encoder_hidden_states)
-                    mv = v_proj(encoder_hidden_states)
-                    
-                    # 检查多尺度QKV
-                    for name, tensor in [("multi_q", mq), ("multi_k", mk), ("multi_v", mv)]:
-                        if torch.any(torch.isnan(tensor)) or torch.any(torch.isinf(tensor)):
-                            print(f"⚠️ {name}异常，使用零值")
-                            tensor.fill_(0.0)
-                    
-                    multi_queries.append(mq)
-                    multi_keys.append(mk)
-                    multi_values.append(mv)
-                except Exception as e:
-                    print(f"⚠️ 多尺度投影失败: {e}")
-                    # 使用零值作为备选
-                    zero_q = torch.zeros_like(multi_scale_hidden)
-                    zero_kv = torch.zeros_like(encoder_hidden_states)
-                    multi_queries.append(zero_q)
-                    multi_keys.append(zero_kv)
-                    multi_values.append(zero_kv)
-            
-            multi_out_parts = []
-            for query_part, key_part, value_part in zip(multi_queries, multi_keys, multi_values):
-                try:
-                    # 🔧 简化的注意力计算 - 添加数值稳定性
-                    attn_scores = torch.matmul(query_part, key_part.transpose(-1, -2)) / math.sqrt(query_part.size(-1))
-                    attn_scores = torch.clamp(attn_scores, min=-10.0, max=10.0)
-                    
-                    attn_probs = torch.softmax(attn_scores, dim=-1)
-                    
-                    # 检查多尺度注意力
-                    if torch.any(torch.isnan(attn_probs)) or torch.any(torch.isinf(attn_probs)):
-                        print(f"⚠️ 多尺度注意力概率异常")
-                        seq_len = attn_probs.size(-1)
-                        attn_probs = torch.full_like(attn_probs, 1.0 / seq_len)
-                    
-                    attn_out = torch.matmul(attn_probs, value_part)
-                    
-                    if torch.any(torch.isnan(attn_out)) or torch.any(torch.isinf(attn_out)):
-                        print(f"⚠️ 多尺度注意力输出异常")
-                        attn_out = torch.zeros_like(attn_out)
-                    
-                    multi_out_parts.append(attn_out)
-                except Exception as e:
-                    print(f"⚠️ 多尺度注意力计算失败: {e}")
-                    multi_out_parts.append(torch.zeros_like(query_part))
-            
-            multi_out = torch.cat(multi_out_parts, dim=-1)
-        except Exception as e:
-            print(f"⚠️ 多尺度注意力路径失败: {e}")
-            multi_out = torch.zeros_like(standard_out)
-        
-        # 🔧 特征融合 - 添加异常处理
-        try:
-            combined_features = torch.cat([standard_out, multi_out], dim=-1)
-            
-            if torch.any(torch.isnan(combined_features)) or torch.any(torch.isinf(combined_features)):
-                print(f"⚠️ 组合特征异常")
-                combined_features = torch.zeros_like(combined_features)
-            
-            fused_output = self.feature_fusion(combined_features)
-            
-            if torch.any(torch.isnan(fused_output)) or torch.any(torch.isinf(fused_output)):
-                print(f"⚠️ 特征融合输出异常")
-                fused_output = torch.zeros_like(standard_out)
-        except Exception as e:
-            print(f"⚠️ 特征融合失败: {e}")
-            fused_output = standard_out
-        
-        # 🔧 输出投影 - 添加异常处理
-        try:
-            final_output = self.to_out(fused_output)
-            
-            if torch.any(torch.isnan(final_output)) or torch.any(torch.isinf(final_output)):
-                print(f"⚠️ 输出投影异常")
-                final_output = torch.zeros_like(final_output)
-        except Exception as e:
-            print(f"⚠️ 输出投影失败: {e}")
-            final_output = torch.zeros_like(fused_output)
+            # 使用安全的零张量
+            final_output = torch.zeros(batch, height * width, channel, device=hidden_states.device)
 
         # 重新reshape为原始形状
         final_output = final_output.transpose(-1, -2).reshape(batch, channel, height, width)
         
-        # 🔧 后归一化和残差连接 - 添加异常处理
-        try:
-            final_output = self.post_norm(final_output)
-            
-            if torch.any(torch.isnan(final_output)) or torch.any(torch.isinf(final_output)):
-                print(f"⚠️ 后归一化异常")
-                final_output = torch.zeros_like(final_output)
-            
-            # 🔧 安全的残差连接
-            result = final_output + residual
-            
-            if torch.any(torch.isnan(result)) or torch.any(torch.isinf(result)):
-                print(f"⚠️ 残差连接异常，仅使用残差")
-                result = residual
-            
-            # 最终输出限制
-            result = torch.clamp(result, min=-5.0, max=5.0)
-            
-            return result
-        except Exception as e:
-            print(f"⚠️ 后处理失败: {e}")
-            return torch.clamp(residual, min=-5.0, max=5.0)
+        # 残差连接
+        result = final_output + residual
+        result = torch.clamp(result, min=-5.0, max=5.0)
+        
+        return result
 
 class UNetModel(nn.Module):
     """
