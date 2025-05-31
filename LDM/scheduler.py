@@ -106,12 +106,19 @@ class DDPMScheduler:
         model_output: torch.Tensor,
         timestep: int,
         sample: torch.Tensor,
+        eta: Optional[float] = None,  # 🔧 添加eta参数以保持接口兼容
         generator: Optional[torch.Generator] = None,
         return_dict: bool = True,
     ) -> Union[Tuple, "DDPMSchedulerOutput"]:
         """
         反向过程：从z_t预测z_{t-1}
+        
+        注意：DDPM调度器不使用eta参数，但接受它以保持接口兼容性
         """
+        # 🔧 如果传入了eta参数，发出提示但不使用
+        if eta is not None and eta != 0.0:
+            print(f"💡 DDPM调度器不使用eta参数 (传入值: {eta})，将使用标准DDPM采样")
+        
         t = timestep
         
         # 1. 计算系数
