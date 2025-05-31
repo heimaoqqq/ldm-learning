@@ -182,6 +182,11 @@ def train_ldm():
         device = torch.device(config['device'])
     print(f"使用设备: {device}")
     
+    # 🆕 梯度累积配置
+    accumulation_steps = config['training'].get('gradient_accumulation_steps', 4)  # 默认累积4步
+    effective_batch_size = config['dataset']['batch_size'] * accumulation_steps
+    print(f"🔧 梯度累积配置: 累积步数={accumulation_steps}, 有效batch size={effective_batch_size}")
+    
     # 创建保存目录
     save_dir = config['training']['save_dir']
     os.makedirs(save_dir, exist_ok=True)
@@ -262,19 +267,22 @@ def train_ldm():
     learning_rate = float(config['training']['lr'])
     weight_decay = float(config['training']['weight_decay'])
     
-    print(f"📊 训练参数: LR={learning_rate:.6f}, 梯度裁剪={config['training']['grad_clip_norm']}")
+    # 🆕 调整学习率以适应梯度累积
+    effective_lr = learning_rate * accumulation_steps
+    print(f"📊 训练参数: 基础LR={learning_rate:.6f}, 有效LR={effective_lr:.6f}, 梯度裁剪={config['training']['grad_clip_norm']}")
     
-    # 优化器
+    # 优化器 - 使用调整后的学习率
     optimizer = optim.AdamW(
         model.unet.parameters(),  # 只优化U-Net参数
-        lr=learning_rate,
+        lr=effective_lr,  # 🆕 使用有效学习率
         weight_decay=weight_decay,
         eps=1e-8,  # 增加数值稳定性
     )
     
     # 学习率调度器
     if config['training']['use_scheduler']:
-        total_steps = len(train_loader) * config['training']['epochs']
+        # 🆕 调整总步数以适应梯度累积
+        total_steps = (len(train_loader) // accumulation_steps) * config['training']['epochs']
         
         # 🔧 根据配置选择调度器类型
         scheduler_type = config['training'].get('scheduler_type', 'cosine')
@@ -283,7 +291,7 @@ def train_ldm():
             print(f"📈 使用带重启的余弦学习率调度器")
             scheduler = get_cosine_schedule_with_restarts(
                 optimizer,
-                num_warmup_steps=config['training']['warmup_steps'],
+                num_warmup_steps=config['training']['warmup_steps'] // accumulation_steps,  # 🆕 调整预热步数
                 num_training_steps=total_steps,
                 num_cycles=3,  # 3次重启周期
                 restart_decay=0.8,  # 每次重启衰减到80%
@@ -292,7 +300,7 @@ def train_ldm():
             print(f"📈 使用标准余弦学习率调度器")
             scheduler = get_cosine_schedule_with_warmup(
                 optimizer,
-                num_warmup_steps=config['training']['warmup_steps'],
+                num_warmup_steps=config['training']['warmup_steps'] // accumulation_steps,  # 🆕 调整预热步数
                 num_training_steps=total_steps,
             )
     else:
@@ -324,6 +332,10 @@ def train_ldm():
         epoch_start_time = time.time()
         valid_batches = 0  # 跟踪有效批次数
         
+        # 🆕 梯度累积相关变量
+        accumulated_loss = 0.0
+        accumulation_count = 0
+        
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['training']['epochs']}")
         
         for batch_idx, (images, labels) in enumerate(progress_bar):
@@ -340,12 +352,15 @@ def train_ldm():
                 outputs = model(images, class_labels=labels)
                 loss = outputs['total_loss']  # 使用新的损失键名
                 
+                # 🆕 调整损失以适应梯度累积
+                loss = loss / accumulation_steps
+                
                 # 检查损失
                 if torch.isnan(loss) or torch.isinf(loss):
                     print(f"❌ 批次 {batch_idx} 损失异常: {loss.item()}")
                     # 尝试使用噪声损失作为备选
                     if 'noise_loss' in outputs:
-                        loss = outputs['noise_loss']
+                        loss = outputs['noise_loss'] / accumulation_steps
                         print(f"  使用噪声损失: {loss.item():.4f}")
                     else:
                         print(f"跳过批次 {batch_idx}")
@@ -356,51 +371,86 @@ def train_ldm():
                     print(f"⚠️ 损失过大 ({loss.item():.2f})，限制为100")
                     loss = torch.clamp(loss, max=100.0)
                 
-                # 反向传播
-                optimizer.zero_grad()
+                # 反向传播 - 🆕 累积梯度
                 loss.backward()
                 
-                # 检查梯度健康
-                total_norm = 0
-                gradient_healthy = True
-                for p in model.unet.parameters():
-                    if p.grad is not None:
-                        param_norm = p.grad.data.norm(2)
-                        if torch.isnan(param_norm) or torch.isinf(param_norm):
-                            print(f"⚠️ 检测到异常梯度，跳过更新")
-                            gradient_healthy = False
-                            break
-                        total_norm += param_norm.item() ** 2
+                # 🆕 累积损失和计数
+                accumulated_loss += loss.item()
+                accumulation_count += 1
                 
-                if gradient_healthy:
-                    total_norm = total_norm ** (1. / 2)
+                # 🆕 只在累积足够步数后进行优化器更新
+                if accumulation_count >= accumulation_steps or batch_idx == len(train_loader) - 1:
+                    # 检查梯度健康
+                    total_norm = 0
+                    gradient_healthy = True
+                    for p in model.unet.parameters():
+                        if p.grad is not None:
+                            param_norm = p.grad.data.norm(2)
+                            if torch.isnan(param_norm) or torch.isinf(param_norm):
+                                print(f"⚠️ 检测到异常梯度，跳过更新")
+                                gradient_healthy = False
+                                break
+                            total_norm += param_norm.item() ** 2
                     
-                    # 梯度裁剪
-                    if config['training']['grad_clip_norm'] > 0:
-                        torch.nn.utils.clip_grad_norm_(model.unet.parameters(), config['training']['grad_clip_norm'])
-                    
-                    optimizer.step()
-                    
-                    # 更新学习率
-                    if scheduler is not None:
-                        scheduler.step()
-                    
-                    # 记录损失
-                    epoch_loss += loss.item()
-                    valid_batches += 1
-                    global_step += 1
-                    
-                    # 更新进度条
+                    if gradient_healthy:
+                        total_norm = total_norm ** (1. / 2)
+                        
+                        # 梯度裁剪
+                        if config['training']['grad_clip_norm'] > 0:
+                            torch.nn.utils.clip_grad_norm_(model.unet.parameters(), config['training']['grad_clip_norm'])
+                        
+                        # 🆕 执行优化器步骤
+                        optimizer.step()
+                        optimizer.zero_grad()  # 清零梯度
+                        
+                        # 更新学习率
+                        if scheduler is not None:
+                            scheduler.step()
+                        
+                        # 🆕 记录累积损失
+                        avg_accumulated_loss = accumulated_loss
+                        epoch_loss += avg_accumulated_loss
+                        valid_batches += 1
+                        global_step += 1
+                        
+                        # 重置累积变量
+                        accumulated_loss = 0.0
+                        accumulation_count = 0
+                        
+                        # 更新进度条
+                        current_lr = optimizer.param_groups[0]['lr']
+                        progress_bar.set_postfix({
+                            'loss': f'{avg_accumulated_loss:.4f}',
+                            'lr': f'{current_lr:.2e}',
+                            'grad_norm': f'{total_norm:.2f}',
+                            'acc_step': f'{accumulation_count}/{accumulation_steps}'
+                        })
+                    else:
+                        # 梯度异常时清零梯度
+                        optimizer.zero_grad()
+                        accumulated_loss = 0.0
+                        accumulation_count = 0
+                else:
+                    # 🆕 未达到累积步数时，更新进度条但不执行优化
                     current_lr = optimizer.param_groups[0]['lr']
                     progress_bar.set_postfix({
-                        'loss': f'{loss.item():.4f}',
+                        'acc_loss': f'{accumulated_loss:.4f}',
                         'lr': f'{current_lr:.2e}',
-                        'grad_norm': f'{total_norm:.2f}'
+                        'acc_step': f'{accumulation_count}/{accumulation_steps}'
                     })
             
             except Exception as e:
                 print(f"❌ 批次 {batch_idx} 出错: {e}")
+                # 🆕 出错时也要清零累积的梯度
+                if accumulation_count > 0:
+                    optimizer.zero_grad()
+                    accumulated_loss = 0.0
+                    accumulation_count = 0
                 continue
+        
+        # 🆕 确保epoch结束时清理任何剩余的梯度
+        if accumulation_count > 0:
+            optimizer.zero_grad()
         
         # 计算平均损失
         if valid_batches > 0:
@@ -412,7 +462,7 @@ def train_ldm():
         epoch_time = time.time() - epoch_start_time
         current_lr = optimizer.param_groups[0]['lr']
         
-        print(f"\nEpoch {epoch+1}/{config['training']['epochs']} - Loss: {avg_epoch_loss:.4f} - Valid Batches: {valid_batches}/{len(train_loader)} - Time: {epoch_time:.1f}s - LR: {current_lr:.2e}")
+        print(f"\nEpoch {epoch+1}/{config['training']['epochs']} - Loss: {avg_epoch_loss:.4f} - Valid Batches: {valid_batches}/{len(train_loader)//accumulation_steps} - Time: {epoch_time:.1f}s - LR: {current_lr:.2e}")
         
         # 验证
         avg_val_loss = None
@@ -472,17 +522,23 @@ def train_ldm():
         else:
             avg_val_loss = avg_epoch_loss
         
-        # FID评估 - 每10个epoch计算一次
+        # FID评估 - 🆕 使用配置的评估间隔
         fid_score = None
         inception_score = None
-        if fid_evaluator and (epoch + 1) % 10 == 0:
+        eval_interval = config['fid_evaluation'].get('eval_interval', 20)  # 默认20个epoch
+        if fid_evaluator and (epoch + 1) % eval_interval == 0:
             print(f"计算评估指标...")
             try:
                 fid_start_time = time.time()
+                
+                # 🆕 使用配置的FID评估参数
+                num_samples = config['fid_evaluation'].get('num_samples', 2048)
+                batch_size = config['fid_evaluation'].get('batch_size', 3)
+                
                 fid_score = fid_evaluator.evaluate_model(
                     model, 
-                    num_samples=min(500, val_dataset_len),  # 限制样本数以节省时间
-                    batch_size=4,  # 较小的批量大小避免内存问题
+                    num_samples=num_samples,
+                    batch_size=batch_size,
                     num_classes=config['unet']['num_classes']
                 )
                 fid_time = time.time() - fid_start_time
@@ -501,15 +557,15 @@ def train_ldm():
                     num_is_samples = min(200, val_dataset_len)  # IS分数样本数
                     
                     for i in range(0, num_is_samples, 8):  # 每次生成8个样本
-                        batch_size = min(8, num_is_samples - i)
+                        batch_size_is = min(8, num_is_samples - i)
                         # 随机选择类别
                         class_labels = torch.randint(0, config['unet']['num_classes'], 
-                                                    (batch_size,), device=device)
+                                                    (batch_size_is,), device=device)
                         
                         generated_batch = model.sample(
-                            batch_size=batch_size,
+                            batch_size=batch_size_is,
                             class_labels=class_labels,
-                            num_inference_steps=20,  # 较少步数以节省时间
+                            num_inference_steps=config['inference']['num_inference_steps'],  # 🆕 使用配置的推理步数
                             guidance_scale=config['inference']['guidance_scale'],
                         )
                         
@@ -615,7 +671,9 @@ def train_ldm():
         'final_val_loss': avg_val_loss,
         'total_parameters': sum(p.numel() for p in model.unet.parameters()),
         'device': str(device),
-        'config': config
+        'config': config,
+        'effective_batch_size': effective_batch_size,  # 🆕 记录有效batch size
+        'gradient_accumulation_steps': accumulation_steps  # 🆕 记录梯度累积步数
     }
     
     with open(os.path.join(save_dir, 'training_report.json'), 'w') as f:
@@ -627,6 +685,7 @@ def train_ldm():
     print(f"  最佳损失: {best_loss:.4f}")
     if best_fid != float('inf'):
         print(f"  最佳FID: {best_fid:.2f}")
+    print(f"  有效批次大小: {effective_batch_size}")
     print(f"  训练日志: {os.path.join(log_dir, 'training_log.json')}")
     print("=" * 80)
 
