@@ -1,0 +1,131 @@
+# FID优化专用配置 - 目标FID < 20
+# 针对步态热力图数据的深度优化版本
+
+# VAE 相关配置 (使用预训练的VQ-VAE)
+vae:
+  model_path: "../VAE/adv_vqvae_best_fid.pth"
+  in_channels: 3
+  latent_dim: 256
+  num_embeddings: 512
+  beta: 0.25
+  vq_ema_decay: 0.99
+  groups: 32
+  freeze: true
+  # VAE输出信息
+  latent_height: 32
+  latent_width: 32
+  latent_channels: 256
+
+# 数据集配置 - FID优化
+dataset:
+  root_dir: "/kaggle/input/dataset"
+  batch_size: 16  # 🎯 降低batch size，专注质量
+  num_workers: 6
+  val_split: 0.2
+  image_size: 256
+
+# 扩散模型配置 - 高质量设置
+diffusion:
+  timesteps: 1000
+  noise_schedule: "scaled_linear"
+  beta_start: 0.00085
+  beta_end: 0.012
+  scheduler_type: "ddim"
+  clip_denoised: true
+  prediction_type: "epsilon"
+
+# U-Net 网络结构配置 - 强化版
+unet:
+  # 输入输出维度
+  in_channels: 256
+  out_channels: 256
+  
+  # 🎯 大模型配置 - 专注图像质量
+  model_channels: 320  # 🚀 接近完整SD规模
+  num_res_blocks: 4    # 🚀 增加ResNet块深度
+  attention_resolutions: [16, 8, 4, 2, 1]  # 🚀 全尺度注意力
+  channel_mult: [1, 2, 4, 6, 8]  # 🚀 更深的通道层次
+  
+  # 强化注意力配置
+  num_head_channels: 80  # 🚀 增大注意力头
+  use_spatial_transformer: true
+  transformer_depth: 3   # 🚀 三层transformer
+  
+  # 条件嵌入
+  num_classes: 31
+  use_fp16: false  # 🎯 使用FP32提高精度
+  
+  # 时间嵌入
+  time_embed_dim: 1280  # 320 * 4
+
+# 训练配置 - 高质量训练
+training:
+  epochs: 600  # 🎯 大幅增加训练轮数
+  lr: 0.00005  # 🎯 更小学习率，精细调优
+  weight_decay: 0.01
+  warmup_steps: 5000  # 🎯 更长warmup
+  
+  # 梯度累积 - 大模型训练
+  gradient_accumulation_steps: 4  # 🎯 累积梯度等效batch64
+  
+  # 保存设置
+  save_dir: "fid_optimized_models"
+  save_interval: 50
+  sample_interval: 25  # 🎯 更频繁生成样本监控
+  log_interval: 20
+  
+  # 损失配置 - 混合损失
+  loss_type: "l2"
+  
+  # Classifier-Free Guidance - 强化
+  use_cfg: true
+  cfg_dropout_prob: 0.1  # 🎯 降低dropout，提高条件遵循
+  
+  # 优化器配置
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1e-8
+  
+  # 梯度裁剪
+  grad_clip_norm: 0.5  # 🎯 更严格的梯度裁剪
+  
+  # 调度器
+  use_scheduler: true
+  scheduler_type: "cosine"
+
+# FID评估配置 - 高精度评估
+fid_evaluation:
+  enabled: true
+  eval_interval: 25  # 🎯 频繁评估监控进展
+  num_samples: 5000  # 🎯 大量样本确保准确性
+  batch_size: 20     # 🎯 平衡速度和精度
+  max_real_samples: 5000
+  save_best_fid_model: true
+
+# 推理配置 - 高质量采样
+inference:
+  num_inference_steps: 250  # 🎯 大幅增加推理步数
+  guidance_scale: 12.0      # 🎯 更强的条件引导
+  eta: 0.0  # DDIM确定性采样
+  
+  # 采样配置
+  sample_batch_size: 8
+  num_samples_per_class: 10
+  
+  # 输出设置
+  output_dir: "fid_optimized_samples"
+  save_format: "png"
+
+# 设备配置
+device: "auto"
+mixed_precision: false  # 🎯 禁用混合精度，追求质量
+use_ema: true
+ema_decay: 0.9999
+
+# 日志配置
+logging:
+  use_wandb: false
+  project_name: "SD-LDM-FID-Optimized"
+  experiment_name: "fid_target_20"
+  log_dir: "fid_logs" 
