@@ -1,373 +1,231 @@
+#!/usr/bin/env python3
+"""
+轻量化StableLDM推理脚本
+快速生成高质量图像
+"""
+
 import os
 import yaml
 import torch
-import torch.nn.functional as F
-import sys
-import argparse
-import numpy as np
-from tqdm import tqdm
-import matplotlib.pyplot as plt
 import torchvision.utils as vutils
-from typing import Dict, Any, List, Optional
+import sys
+from typing import Optional
 
 # 添加模块路径
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
 
-from ldm import LatentDiffusionModel
-# 直接从VAE目录导入dataset功能
-from dataset import build_dataloader
+from stable_ldm import create_stable_ldm
 
-def denormalize(x):
-    """反归一化图像，从[-1,1]转换到[0,1]"""
-    return (x * 0.5 + 0.5).clamp(0, 1)
-
-def generate_class_samples(
-    model: LatentDiffusionModel,
-    device: torch.device,
-    config: Dict[str, Any],
-    class_id: int,
-    num_samples: int = 16,
-    save_path: Optional[str] = None,
-) -> torch.Tensor:
-    """
-    为指定类别生成样本
-    """
-    model.eval()
-    
-    with torch.no_grad():
-        class_labels = torch.tensor([class_id] * num_samples, device=device)
-        
-        generated_images = model.sample(
-            batch_size=num_samples,
-            class_labels=class_labels,
-            num_inference_steps=config['inference']['num_inference_steps'],
-            guidance_scale=config['inference']['guidance_scale'],
-            eta=config['inference']['eta'],
-        )
-        
-        # 反归一化
-        generated_images = denormalize(generated_images)
-        
-        if save_path:
-            # 创建图像网格
-            grid = vutils.make_grid(generated_images, nrow=4, normalize=False, padding=2)
-            vutils.save_image(grid, save_path)
-            print(f"类别 {class_id} 的生成图像已保存: {save_path}")
-        
-        return generated_images
-
-def generate_all_classes(
-    model: LatentDiffusionModel,
-    device: torch.device,
-    config: Dict[str, Any],
-    output_dir: str,
-    num_samples_per_class: int = 8,
-):
-    """
-    为所有类别生成样本
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    
-    num_classes = config['unet']['num_classes']
-    
-    print(f"为 {num_classes} 个类别生成样本，每类 {num_samples_per_class} 个...")
-    
-    all_images = []
-    for class_id in tqdm(range(num_classes), desc="生成类别样本"):
-        save_path = os.path.join(output_dir, f"class_{class_id:03d}.png")
-        
-        images = generate_class_samples(
-            model, device, config, class_id, 
-            num_samples_per_class, save_path
-        )
-        
-        # 只保留前4个样本用于总览
-        all_images.append(images[:4])
-    
-    # 创建所有类别的总览
-    if all_images:
-        all_images = torch.cat(all_images, dim=0)
-        overview_grid = vutils.make_grid(all_images, nrow=4, normalize=False, padding=2)
-        overview_path = os.path.join(output_dir, "all_classes_overview.png")
-        vutils.save_image(overview_grid, overview_path)
-        print(f"所有类别总览已保存: {overview_path}")
-
-def interpolation_demo(
-    model: LatentDiffusionModel,
-    device: torch.device,
-    val_loader: torch.utils.data.DataLoader,
-    config: Dict[str, Any],
-    output_dir: str,
-    num_steps: int = 10,
-):
-    """
-    潜在空间插值演示
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    
-    model.eval()
-    
-    # 获取两个真实图像进行插值
-    with torch.no_grad():
-        for images, labels in val_loader:
-            if images.shape[0] >= 2:
-                images = images[:2].to(device)
-                labels = labels[:2].to(device)
-                break
-        
-        # 进行插值
-        interpolated_images = model.interpolate(
-            images1=images[0:1],
-            images2=images[1:2],
-            num_steps=num_steps,
-        )
-        
-        # 反归一化
-        interpolated_images = denormalize(interpolated_images)
-        original_images = denormalize(images)
-        
-        # 创建插值序列图像
-        all_images = [original_images[0:1]]  # 起始图像
-        all_images.extend([img for img in interpolated_images])
-        all_images.append(original_images[1:2])  # 结束图像
-        
-        all_images = torch.cat(all_images, dim=0)
-        
-        # 保存插值序列
-        grid = vutils.make_grid(all_images, nrow=len(all_images), normalize=False, padding=2)
-        save_path = os.path.join(output_dir, "interpolation_demo.png")
-        vutils.save_image(grid, save_path)
-        print(f"插值演示已保存: {save_path}")
-
-def guidance_scale_comparison(
-    model: LatentDiffusionModel,
-    device: torch.device,
-    config: Dict[str, Any],
-    output_dir: str,
-    class_id: int = 0,
-    guidance_scales: List[float] = [1.0, 3.0, 5.0, 7.5, 10.0, 15.0],
-):
-    """
-    不同引导强度的比较
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    
-    model.eval()
-    
-    # 固定种子以确保可重现性
-    generator = torch.Generator(device=device).manual_seed(42)
-    
-    # 使用相同的初始噪声
-    latent_shape = model.get_latent_shape(config['dataset']['image_size'])
-    initial_latents = torch.randn((1, *latent_shape), generator=generator, device=device)
-    
-    all_images = []
-    labels = []
-    
-    for guidance_scale in guidance_scales:
-        with torch.no_grad():
-            class_labels = torch.tensor([class_id], device=device)
-            
-            generated_image = model.sample(
-                batch_size=1,
-                class_labels=class_labels,
-                num_inference_steps=config['inference']['num_inference_steps'],
-                guidance_scale=guidance_scale,
-                eta=config['inference']['eta'],
-            )
-            
-            # 反归一化
-            generated_image = denormalize(generated_image)
-            all_images.append(generated_image)
-            labels.append(f"CFG={guidance_scale}")
-    
-    # 创建比较图像
-    all_images = torch.cat(all_images, dim=0)
-    grid = vutils.make_grid(all_images, nrow=len(guidance_scales), normalize=False, padding=2)
-    
-    save_path = os.path.join(output_dir, f"guidance_comparison_class_{class_id}.png")
-    vutils.save_image(grid, save_path)
-    print(f"引导强度比较已保存: {save_path}")
-
-def sampling_steps_comparison(
-    model: LatentDiffusionModel,
-    device: torch.device,
-    config: Dict[str, Any],
-    output_dir: str,
-    class_id: int = 0,
-    step_counts: List[int] = [10, 20, 30, 50, 100],
-):
-    """
-    不同采样步数的比较
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    
-    model.eval()
-    
-    # 固定种子
-    generator = torch.Generator(device=device).manual_seed(42)
-    latent_shape = model.get_latent_shape(config['dataset']['image_size'])
-    initial_latents = torch.randn((1, *latent_shape), generator=generator, device=device)
-    
-    all_images = []
-    
-    for num_steps in step_counts:
-        with torch.no_grad():
-            class_labels = torch.tensor([class_id], device=device)
-            
-            generated_image = model.sample(
-                batch_size=1,
-                class_labels=class_labels,
-                num_inference_steps=num_steps,
-                guidance_scale=config['inference']['guidance_scale'],
-                eta=config['inference']['eta'],
-            )
-            
-            generated_image = denormalize(generated_image)
-            all_images.append(generated_image)
-    
-    # 创建比较图像
-    all_images = torch.cat(all_images, dim=0)
-    grid = vutils.make_grid(all_images, nrow=len(step_counts), normalize=False, padding=2)
-    
-    save_path = os.path.join(output_dir, f"steps_comparison_class_{class_id}.png")
-    vutils.save_image(grid, save_path)
-    print(f"采样步数比较已保存: {save_path}")
-
-def evaluate_reconstruction(
-    model: LatentDiffusionModel,
-    device: torch.device,
-    val_loader: torch.utils.data.DataLoader,
-    output_dir: str,
-    num_samples: int = 16,
-):
-    """
-    评估重建质量
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    
-    model.eval()
-    
-    with torch.no_grad():
-        # 获取真实图像
-        for images, labels in val_loader:
-            if images.shape[0] >= num_samples:
-                images = images[:num_samples].to(device)
-                break
-        
-        # 通过VAE重建
-        reconstructed = model.vae(images)[0]
-        
-        # 反归一化
-        original_images = denormalize(images)
-        reconstructed_images = denormalize(reconstructed)
-        
-        # 创建比较图像
-        comparison = []
-        for i in range(min(8, num_samples)):  # 最多显示8对
-            comparison.extend([original_images[i], reconstructed_images[i]])
-        
-        comparison = torch.stack(comparison)
-        grid = vutils.make_grid(comparison, nrow=2, normalize=False, padding=2)
-        
-        save_path = os.path.join(output_dir, "reconstruction_comparison.png")
-        vutils.save_image(grid, save_path)
-        print(f"重建质量评估已保存: {save_path}")
-        
-        # 计算重建损失
-        mse_loss = F.mse_loss(reconstructed, images).item()
-        print(f"重建MSE损失: {mse_loss:.4f}")
-
-def main():
-    parser = argparse.ArgumentParser(description="LDM推理脚本")
-    parser.add_argument("--config", type=str, default="config.yaml", help="配置文件路径")
-    parser.add_argument("--model_path", type=str, default="ldm_models/best_model", help="模型路径")
-    parser.add_argument("--output_dir", type=str, default="inference_results", help="输出目录")
-    parser.add_argument("--mode", type=str, default="all", 
-                        choices=["all", "generate", "interpolate", "guidance", "steps", "reconstruct"],
-                        help="推理模式")
-    parser.add_argument("--class_id", type=int, default=0, help="指定类别ID")
-    parser.add_argument("--num_samples", type=int, default=16, help="生成样本数量")
-    
-    args = parser.parse_args()
+def load_model(config_path: str, checkpoint_path: str, device: str = 'auto') -> torch.nn.Module:
+    """加载训练好的模型"""
     
     # 加载配置
-    with open(args.config, 'r', encoding='utf-8') as f:
+    with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
     
     # 设备配置
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"使用设备: {device}")
-    
-    # 创建输出目录
-    os.makedirs(args.output_dir, exist_ok=True)
-    
-    # 初始化模型
-    print("加载LDM模型...")
-    
-    # 处理VAE路径
-    vae_path = config['vae']['model_path']
-    if vae_path.startswith('../'):
-        vae_path = os.path.join(os.path.dirname(__file__), vae_path)
-    
-    model = LatentDiffusionModel(
-        vae_config=config['vae'],
-        unet_config=config['unet'],
-        scheduler_config=config['diffusion'],
-        vae_path=vae_path,
-        freeze_vae=config['vae']['freeze'],
-        use_cfg=config['training']['use_cfg'],
-        cfg_dropout_prob=config['training']['cfg_dropout_prob'],
-    ).to(device)
-    
-    # 加载训练好的模型
-    if os.path.exists(args.model_path):
-        model.load_pretrained(args.model_path)
+    if device == 'auto':
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     else:
-        print(f"警告: 模型路径不存在: {args.model_path}")
-        print("使用未训练的模型进行推理...")
+        device = torch.device(device)
     
-    # 加载验证数据
-    print("加载验证数据...")
-    _, val_loader, _, _ = build_dataloader(
-        config['dataset']['root_dir'],
-        batch_size=config['inference']['sample_batch_size'],
-        num_workers=0,
-        shuffle_train=False,
-        shuffle_val=False,
-        val_split=config['dataset']['val_split']
-    )
+    print(f"🚀 使用设备: {device}")
     
-    # 执行推理
-    if args.mode == "all" or args.mode == "generate":
-        print("生成类别样本...")
-        generate_all_classes(model, device, config, 
-                            os.path.join(args.output_dir, "generated_samples"),
-                            config['inference']['num_samples_per_class'])
+    # 创建模型
+    model = create_stable_ldm(config).to(device)
     
-    if args.mode == "all" or args.mode == "interpolate":
-        print("执行插值演示...")
-        interpolation_demo(model, device, val_loader, config,
-                          os.path.join(args.output_dir, "interpolation"))
+    # 加载权重
+    unet_path = os.path.join(checkpoint_path, 'unet.pth')
+    if os.path.exists(unet_path):
+        state_dict = torch.load(unet_path, map_location=device)
+        model.unet.load_state_dict(state_dict)
+        print(f"✅ 已加载U-Net权重: {unet_path}")
+    else:
+        print(f"⚠️ 未找到U-Net权重文件: {unet_path}")
     
-    if args.mode == "all" or args.mode == "guidance":
-        print("比较不同引导强度...")
-        guidance_scale_comparison(model, device, config,
-                                 os.path.join(args.output_dir, "guidance_comparison"),
-                                 args.class_id)
+    # 加载EMA权重（如果有）
+    ema_path = os.path.join(checkpoint_path, 'ema.pth')
+    if os.path.exists(ema_path) and hasattr(model, 'ema') and model.ema is not None:
+        ema_state = torch.load(ema_path, map_location=device)
+        model.ema.shadow = ema_state
+        print(f"✅ 已加载EMA权重: {ema_path}")
     
-    if args.mode == "all" or args.mode == "steps":
-        print("比较不同采样步数...")
-        sampling_steps_comparison(model, device, config,
-                                 os.path.join(args.output_dir, "steps_comparison"),
-                                 args.class_id)
+    model.eval()
+    return model, config, device
+
+def generate_samples(
+    model,
+    config,
+    device,
+    num_samples_per_class: int = 4,
+    num_classes_to_show: int = 8,
+    num_inference_steps: int = 50,
+    guidance_scale: float = 7.5,
+    use_ema: bool = False,
+    output_dir: str = 'generated_samples'
+):
+    """生成样本图像"""
     
-    if args.mode == "all" or args.mode == "reconstruct":
-        print("评估重建质量...")
-        evaluate_reconstruction(model, device, val_loader,
-                               os.path.join(args.output_dir, "reconstruction"))
+    os.makedirs(output_dir, exist_ok=True)
     
-    print(f"推理完成！结果保存在: {args.output_dir}")
+    print(f"🎨 开始生成样本...")
+    print(f"   推理步数: {num_inference_steps}")
+    print(f"   CFG强度: {guidance_scale}")
+    print(f"   使用EMA: {'✓' if use_ema else '✗'}")
+    
+    all_images = []
+    all_labels = []
+    
+    total_classes = config['unet']['num_classes']
+    classes_to_generate = min(num_classes_to_show, total_classes)
+    
+    with torch.no_grad():
+        for class_id in range(classes_to_generate):
+            print(f"   生成类别 {class_id+1}/{classes_to_generate}...")
+            
+            class_labels = torch.tensor([class_id] * num_samples_per_class, device=device)
+            
+            generated_images = model.sample(
+                batch_size=num_samples_per_class,
+                class_labels=class_labels,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                use_ema=use_ema,
+                verbose=False
+            )
+            
+            all_images.append(generated_images)
+            all_labels.extend([class_id] * num_samples_per_class)
+    
+    # 拼接所有图像
+    if all_images:
+        all_images = torch.cat(all_images, dim=0)
+        
+        # 保存图像网格
+        grid = vutils.make_grid(
+            all_images, 
+            nrow=num_samples_per_class, 
+            normalize=False, 
+            padding=2
+        )
+        
+        grid_path = os.path.join(output_dir, 'sample_grid.png')
+        vutils.save_image(grid, grid_path)
+        print(f"✅ 样本网格已保存: {grid_path}")
+        
+        # 保存单个图像
+        for i, (image, label) in enumerate(zip(all_images, all_labels)):
+            single_path = os.path.join(output_dir, f'sample_class_{label}_idx_{i%num_samples_per_class}.png')
+            vutils.save_image(image, single_path)
+        
+        print(f"✅ 共生成 {len(all_images)} 张图像")
+        print(f"📁 保存目录: {output_dir}")
+
+def generate_interpolation(
+    model,
+    config, 
+    device,
+    class_a: int,
+    class_b: int,
+    num_steps: int = 8,
+    num_inference_steps: int = 50,
+    guidance_scale: float = 7.5,
+    use_ema: bool = False,
+    output_dir: str = 'generated_samples'
+):
+    """生成类别间插值"""
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    print(f"🔄 生成类别插值: {class_a} → {class_b}")
+    
+    # 创建插值权重
+    weights = torch.linspace(0, 1, num_steps)
+    
+    interpolated_images = []
+    
+    with torch.no_grad():
+        for i, w in enumerate(weights):
+            print(f"   插值步骤 {i+1}/{num_steps} (权重: {w:.2f})")
+            
+            # 混合类别嵌入（需要修改模型以支持连续类别嵌入）
+            # 这里简化为选择离散类别
+            current_class = class_a if w < 0.5 else class_b
+            class_labels = torch.tensor([current_class], device=device)
+            
+            generated_image = model.sample(
+                batch_size=1,
+                class_labels=class_labels,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                use_ema=use_ema,
+                verbose=False
+            )
+            
+            interpolated_images.append(generated_image)
+    
+    # 保存插值序列
+    if interpolated_images:
+        all_interp = torch.cat(interpolated_images, dim=0)
+        
+        # 水平排列
+        grid = vutils.make_grid(all_interp, nrow=num_steps, normalize=False, padding=2)
+        
+        interp_path = os.path.join(output_dir, f'interpolation_{class_a}_to_{class_b}.png')
+        vutils.save_image(grid, interp_path)
+        print(f"✅ 插值序列已保存: {interp_path}")
+
+def main():
+    """主函数"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='StableLDM推理脚本')
+    parser.add_argument('--config', type=str, default='config.yaml', help='配置文件路径')
+    parser.add_argument('--checkpoint', type=str, required=True, help='模型检查点路径')
+    parser.add_argument('--output', type=str, default='generated_samples', help='输出目录')
+    parser.add_argument('--num_samples', type=int, default=4, help='每个类别生成的样本数')
+    parser.add_argument('--num_classes', type=int, default=8, help='显示的类别数')
+    parser.add_argument('--steps', type=int, default=50, help='推理步数')
+    parser.add_argument('--cfg', type=float, default=7.5, help='CFG引导强度')
+    parser.add_argument('--use_ema', action='store_true', help='使用EMA权重')
+    parser.add_argument('--interpolation', action='store_true', help='生成插值样本')
+    parser.add_argument('--class_a', type=int, default=0, help='插值起始类别')
+    parser.add_argument('--class_b', type=int, default=5, help='插值结束类别')
+    
+    args = parser.parse_args()
+    
+    print("🎯 轻量化StableLDM推理")
+    print("=" * 50)
+    
+    # 加载模型
+    model, config, device = load_model(args.config, args.checkpoint)
+    
+    if args.interpolation:
+        # 生成插值
+        generate_interpolation(
+            model, config, device,
+            class_a=args.class_a,
+            class_b=args.class_b,
+            num_steps=8,
+            num_inference_steps=args.steps,
+            guidance_scale=args.cfg,
+            use_ema=args.use_ema,
+            output_dir=args.output
+        )
+    else:
+        # 生成常规样本
+        generate_samples(
+            model, config, device,
+            num_samples_per_class=args.num_samples,
+            num_classes_to_show=args.num_classes,
+            num_inference_steps=args.steps,
+            guidance_scale=args.cfg,
+            use_ema=args.use_ema,
+            output_dir=args.output
+        )
+    
+    print("=" * 50)
+    print("🎉 推理完成！")
 
 if __name__ == "__main__":
     main() 
