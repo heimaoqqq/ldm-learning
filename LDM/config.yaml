@@ -57,12 +57,12 @@ unet:
 # 训练配置
 training:
   epochs: 500
-  lr: 0.00002  # 🔧 降低基础学习率，防止梯度累积时数值不稳定
+  lr: 0.000005  # 🔧 进一步降低学习率，防止数值爆炸
   weight_decay: 0.01
-  warmup_steps: 1000  # 🎯 保持预热步数
+  warmup_steps: 2000  # 🔧 增加预热步数，更稳定的开始
   
   # 🆕 梯度累积配置
-  gradient_accumulation_steps: 2  # 🔧 降低累积步数，减少数值不稳定风险
+  gradient_accumulation_steps: 1  # 🔧 先用1步累积，稳定后再增加
   
   # 保存设置
   save_dir: "ldm_models"
@@ -75,10 +75,10 @@ training:
   
   # Classifier-Free Guidance
   use_cfg: true  # 使用无分类器引导
-  cfg_dropout_prob: 0.2  # 🎯 保持强CFG训练
+  cfg_dropout_prob: 0.1  # 🔧 降低CFG dropout，减少训练困难
   
   # 梯度裁剪
-  grad_clip_norm: 0.5  # 🔧 更严格的梯度裁剪
+  grad_clip_norm: 0.2  # 🔧 更严格的梯度裁剪
   
   # 调度器
   use_scheduler: true
@@ -87,22 +87,22 @@ training:
 # FID评估配置
 fid_evaluation:
   enabled: true  # 🎯 保持FID评估监控质量
-  eval_interval: 5  # 🎯 适中的评估频率
+  eval_interval: 5  # 🎯 高的评估频率
   num_samples: 2048  # 🎯 适中的样本数，平衡准确性和内存
-  batch_size: 3  # 🎯 降低到3，配合主训练batch_size
+  batch_size: 1  # 🔧 配合推理batch_size调整为1
   max_real_samples: 2048  # 🎯 适中的真实样本数
   save_best_fid_model: true  # 保存最佳FID模型
 
 # 推理配置
 inference:
-  num_inference_steps: 50  # 🆕 降低推理步数以提高速度
+  num_inference_steps: 250  # 🔧 提高DDIM步数到250，获得更高质量
   guidance_scale: 7.5  # CFG引导强度
   eta: 0.3  # 🆕 使用中等eta值，平衡质量和多样性 (0=确定性, 1=随机)
   adaptive_eta: true  # 🆕 启用改进的自适应eta
   
   # 采样配置
-  sample_batch_size: 3  # 🎯 配合训练batch_size
-  num_samples_per_class: 6  # 🎯 适中的样本数量
+  sample_batch_size: 1  # 🔧 修改为仅生成1张图片
+  num_samples_per_class: 1  # 🔧 每个类别只生成1个样本
   
   # 🆕 归一化配置
   normalization:
