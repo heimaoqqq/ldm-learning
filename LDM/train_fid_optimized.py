@@ -90,8 +90,6 @@ def save_model_checkpoint(model, save_path, epoch=None, extra_info=None):
     if hasattr(model, 'config'):
         with open(os.path.join(save_path, 'config.yaml'), 'w') as f:
             yaml.dump(model.config, f, default_flow_style=False)
-    
-    print(f"✅ 模型已保存到: {save_path}")
 
 def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps: int, num_training_steps: int):
     """余弦学习率调度器"""
@@ -334,6 +332,14 @@ def train_fid_optimized():
               f"Time: {epoch_time:.1f}s - "
               f"LR: {current_lr:.2e}")
         
+        # 显示验证损失趋势
+        if best_loss != float('inf'):
+            loss_diff = avg_val_loss - best_loss
+            if loss_diff <= 0:
+                print(f"📉 验证损失: {avg_val_loss:.4f} (新纪录! ⬇{abs(loss_diff):.4f})")
+            else:
+                print(f"📊 验证损失: {avg_val_loss:.4f} (距最佳: +{loss_diff:.4f})")
+        
         # FID评估
         fid_score = None
         eval_interval = config['fid_evaluation'].get('eval_interval', 25)
@@ -357,7 +363,16 @@ def train_fid_optimized():
                 )
                 
                 fid_time = time.time() - fid_start_time
-                print(f"✅ FID: {fid_score:.2f} | 时间: {fid_time:.1f}s")
+                
+                # 显示FID结果和趋势
+                if best_fid != float('inf'):
+                    fid_diff = fid_score - best_fid
+                    if fid_score < best_fid:
+                        print(f"✅ FID: {fid_score:.2f} (新纪录! ⬇{abs(fid_diff):.2f}) | 时间: {fid_time:.1f}s")
+                    else:
+                        print(f"📊 FID: {fid_score:.2f} (距最佳: +{fid_diff:.2f}) | 时间: {fid_time:.1f}s")
+                else:
+                    print(f"✅ FID: {fid_score:.2f} (首次评估) | 时间: {fid_time:.1f}s")
                 
                 # 更新最佳FID
                 if fid_score < best_fid:
@@ -370,7 +385,7 @@ def train_fid_optimized():
                         epoch=epoch+1, 
                         extra_info={'fid_score': fid_score, 'best_fid': True}
                     )
-                    print(f"🎉 新FID纪录: {best_fid:.2f}")
+                    print(f"🎉 新FID最佳模型已保存!")
                     
                     # 如果达到目标FID
                     if fid_score < 20:
@@ -390,7 +405,7 @@ def train_fid_optimized():
         with open(os.path.join(log_dir, 'fid_training_log.json'), 'w') as f:
             json.dump(training_log, f, indent=2)
         
-        # 保存最佳损失模型
+        # 保存最佳损失模型（只在创建新纪录时输出）
         if avg_val_loss < best_loss:
             best_loss = avg_val_loss
             best_model_path = os.path.join(save_dir, 'best_loss_model')
@@ -410,6 +425,7 @@ def train_fid_optimized():
                 epoch=epoch+1, 
                 extra_info={'train_loss': avg_epoch_loss, 'val_loss': avg_val_loss}
             )
+            print(f"💾 定期checkpoint已保存: epoch_{epoch+1}")
         
         # 生成样本图像
         if (epoch + 1) % config['training']['sample_interval'] == 0:
