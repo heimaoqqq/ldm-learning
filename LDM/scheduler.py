@@ -238,7 +238,9 @@ class DDIMScheduler(DDPMScheduler):
             variance = self._get_variance(timestep, prev_timestep)
         
         # 5. 计算方向指向当前样本的"方向"
-        pred_sample_direction = (1 - alpha_prod_t_prev - eta * variance) ** (0.5) * model_output
+        # 确保开方参数非负
+        term_for_sqrt = (1 - alpha_prod_t_prev - eta * variance).clamp(min=0.0)
+        pred_sample_direction = term_for_sqrt.sqrt() * model_output
         
         # 6. 计算前一样本
         pred_prev_sample = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
@@ -247,7 +249,9 @@ class DDIMScheduler(DDPMScheduler):
         if eta > 0:
             device = model_output.device
             noise = torch.randn(model_output.shape, generator=generator, device=device, dtype=model_output.dtype)
-            pred_prev_sample = pred_prev_sample + (eta * variance) ** (0.5) * noise
+            # 确保开方参数非负
+            variance_term_for_noise = (eta * variance).clamp(min=0.0)
+            pred_prev_sample = pred_prev_sample + variance_term_for_noise.sqrt() * noise
         
         if not return_dict:
             return (pred_prev_sample,)
