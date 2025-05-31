@@ -74,12 +74,17 @@ def save_model_checkpoint(model, save_path, epoch=None, extra_info=None):
     os.makedirs(save_path, exist_ok=True)
     
     # 保存模型权重
-    torch.save({
+    checkpoint = {
         'unet_state_dict': model.unet.state_dict(),
-        'ema_state_dict': model.ema.averaged_model.state_dict() if model.ema else None,
         'epoch': epoch,
         'extra_info': extra_info or {}
-    }, os.path.join(save_path, 'model.pth'))
+    }
+    
+    # 保存EMA权重（如果存在）
+    if model.ema is not None:
+        checkpoint['ema_shadow'] = model.ema.shadow
+    
+    torch.save(checkpoint, os.path.join(save_path, 'model.pth'))
     
     # 保存配置
     if hasattr(model, 'config'):
