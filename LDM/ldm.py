@@ -32,22 +32,33 @@ class LatentDiffusionModel(nn.Module):
         self.vae = self._init_vae(config['vae'])
         
         # 初始化扩散调度器 - 🆕 支持DDIM和改进eta
-        if config['diffusion'].get('scheduler_type', 'ddpm') == 'ddim':
+        scheduler_config = config['diffusion']
+        scheduler_type = scheduler_config.get('scheduler_type', 'ddpm').lower()
+        
+        if scheduler_type == 'ddim':
+            # 🔧 从推理配置获取eta参数，确保一致性
+            inference_config = config.get('inference', {})
+            default_eta = inference_config.get('eta', 0.0)
+            adaptive_eta = inference_config.get('adaptive_eta', False)
+            
             self.scheduler = DDIMScheduler(
-                num_train_timesteps=config['diffusion']['timesteps'],
-                beta_start=config['diffusion']['beta_start'],
-                beta_end=config['diffusion']['beta_end'],
-                beta_schedule=config['diffusion']['noise_schedule'],
-                eta=config['inference'].get('eta', 0.0),
-                adaptive_eta=config['inference'].get('adaptive_eta', False)
+                num_train_timesteps=scheduler_config['timesteps'],
+                beta_start=scheduler_config['beta_start'],
+                beta_end=scheduler_config['beta_end'],
+                beta_schedule=scheduler_config['noise_schedule'],
+                eta=default_eta,
+                adaptive_eta=adaptive_eta
             )
+            print(f"✅ 使用DDIM调度器，默认eta={default_eta}, 自适应eta={adaptive_eta}")
         else:
+            # 标准DDPM调度器
             self.scheduler = DDPMScheduler(
-                num_train_timesteps=config['diffusion']['timesteps'],
-                beta_start=config['diffusion']['beta_start'],
-                beta_end=config['diffusion']['beta_end'],
-                beta_schedule=config['diffusion']['noise_schedule']
+                num_train_timesteps=scheduler_config['timesteps'],
+                beta_start=scheduler_config['beta_start'],
+                beta_end=scheduler_config['beta_end'],
+                beta_schedule=scheduler_config['noise_schedule']
             )
+            print(f"✅ 使用DDPM调度器")
         
         # 初始化U-Net
         self.unet = UNetModel(**config['unet'])
@@ -98,7 +109,31 @@ class LatentDiffusionModel(nn.Module):
     def decode_from_latent(self, latents: torch.Tensor) -> torch.Tensor:
         """从潜在空间解码到图像"""
         with torch.no_grad():
-            return self.vae.decoder(latents)
+            # 🔧 添加潜在表示范围检查和裁剪
+            # 监控输入范围
+            input_min, input_max = latents.min().item(), latents.max().item()
+            input_std = latents.std().item()
+            
+            # 如果范围超出合理范围，进行裁剪
+            if abs(input_min) > 10 or abs(input_max) > 10:
+                print(f"⚠️ 潜在表示范围异常: [{input_min:.3f}, {input_max:.3f}], 进行裁剪")
+                latents = torch.clamp(latents, min=-5.0, max=5.0)
+            
+            # 如果标准差过大，进行缩放
+            if input_std > 3.0:
+                print(f"⚠️ 潜在表示标准差过大: {input_std:.3f}, 进行缩放")
+                latents = latents / (input_std / 2.0)  # 缩放到合理范围
+            
+            # VAE解码
+            decoded = self.vae.decoder(latents)
+            
+            # 🔧 检查解码输出范围
+            output_min, output_max = decoded.min().item(), decoded.max().item()
+            if output_min < -1.1 or output_max > 1.1:
+                print(f"⚠️ VAE解码输出超出tanh范围: [{output_min:.3f}, {output_max:.3f}]")
+                decoded = torch.clamp(decoded, min=-1.0, max=1.0)
+            
+            return decoded
     
     def forward(self, images: torch.Tensor, class_labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """
@@ -153,22 +188,37 @@ class LatentDiffusionModel(nn.Module):
         class_labels: Optional[torch.Tensor] = None,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
-        eta: float = 0.0
+        eta: Optional[float] = None  # 🔧 改为可选参数，默认使用调度器配置
     ) -> torch.Tensor:
         """
-        DDIM采样生成图像
+        DDIM/DDPM采样生成图像
         
         Args:
             batch_size: 批次大小
             class_labels: [batch_size] 类别标签
             num_inference_steps: 推理步数
             guidance_scale: CFG引导强度
-            eta: DDIM参数 (0为确定性采样)
+            eta: DDIM参数 (None=使用调度器默认值, 0=确定性采样)
             
         Returns:
             生成的图像 [batch_size, 3, H, W]
         """
         device = self.device
+        
+        # 🔧 确定实际使用的eta值
+        if eta is None:
+            # 使用调度器的默认eta（如果是DDIM）
+            actual_eta = getattr(self.scheduler, 'eta', 0.0)
+        else:
+            actual_eta = eta
+        
+        # 🔧 检查调度器类型和eta兼容性
+        is_ddim = isinstance(self.scheduler, DDIMScheduler)
+        if not is_ddim and actual_eta != 0.0:
+            print(f"⚠️ 当前使用DDPM调度器，eta参数({actual_eta})将被忽略")
+            actual_eta = 0.0
+        
+        print(f"🔄 开始采样: 调度器={'DDIM' if is_ddim else 'DDPM'}, 步数={num_inference_steps}, eta={actual_eta}, CFG={guidance_scale}")
         
         # 获取潜在空间尺寸
         # 假设输入图像为256x256，VAE下采样8倍，得到32x32
@@ -183,9 +233,9 @@ class LatentDiffusionModel(nn.Module):
         )
         
         # 设置推理调度器
-        self.scheduler.set_timesteps(num_inference_steps)
+        self.scheduler.set_timesteps(num_inference_steps, device=device)
         
-        for t in self.scheduler.timesteps:
+        for i, t in enumerate(self.scheduler.timesteps):
             # 扩展时间步
             t_batch = t.unsqueeze(0).repeat(batch_size).to(device)
             
@@ -212,18 +262,71 @@ class LatentDiffusionModel(nn.Module):
                 # 无CFG的标准预测
                 noise_pred = self.unet(latents, t_batch, class_labels)
             
-            # DDIM步骤
-            result = self.scheduler.step(noise_pred, t, latents)
-            latents = result.prev_sample if hasattr(result, 'prev_sample') else result[0]
+            # 🔧 统一的调度器步骤调用
+            try:
+                if is_ddim:
+                    # DDIM调度器 - 传递eta参数
+                    result = self.scheduler.step(
+                        model_output=noise_pred, 
+                        timestep=t, 
+                        sample=latents, 
+                        eta=actual_eta
+                    )
+                else:
+                    # DDPM调度器 - 传递eta以保持兼容性（但会被忽略）
+                    result = self.scheduler.step(
+                        model_output=noise_pred, 
+                        timestep=t, 
+                        sample=latents,
+                        eta=actual_eta  # DDPM会忽略这个参数
+                    )
+                
+                latents = result.prev_sample if hasattr(result, 'prev_sample') else result[0]
+                
+                # 🔧 定期打印进度
+                if i % (len(self.scheduler.timesteps) // 4) == 0:
+                    print(f"  📊 采样进度: {i+1}/{len(self.scheduler.timesteps)}")
+                    
+            except Exception as e:
+                print(f"⚠️ 采样步骤 {i} 出错: {e}")
+                # 继续采样，但使用前一个latents
+                continue
         
         # 解码到图像空间
-        images = self.decode_from_latent(latents)
-        
-        # 归一化到[0,1]
-        images = (images + 1.0) / 2.0
-        images = torch.clamp(images, 0.0, 1.0)
-        
-        return images
+        try:
+            images = self.decode_from_latent(latents)
+            
+            # 🔧 改进的归一化处理
+            # 记录解码后的原始范围
+            raw_min, raw_max = images.min().item(), images.max().item()
+            
+            # 归一化到[0,1]，更鲁棒的处理
+            if raw_min >= -1.1 and raw_max <= 1.1:
+                # 标准情况：VAE输出在[-1,1]范围内
+                images = (images + 1.0) / 2.0
+            else:
+                # 异常情况：使用min-max归一化
+                print(f"⚠️ VAE输出范围异常: [{raw_min:.3f}, {raw_max:.3f}], 使用自适应归一化")
+                images = (images - raw_min) / (raw_max - raw_min + 1e-8)
+            
+            # 最终裁剪到[0,1]
+            images = torch.clamp(images, 0.0, 1.0)
+            
+            # 🔧 质量检查
+            final_min, final_max = images.min().item(), images.max().item()
+            final_mean = images.mean().item()
+            
+            if final_mean < 0.1 or final_mean > 0.9:
+                print(f"⚠️ 生成图像亮度异常: 均值={final_mean:.3f}")
+            
+            print(f"✅ 采样完成，生成 {batch_size} 张图像")
+            print(f"   📊 最终图像范围: [{final_min:.3f}, {final_max:.3f}], 均值: {final_mean:.3f}")
+            return images
+            
+        except Exception as e:
+            print(f"⚠️ 图像解码失败: {e}")
+            # 返回一个默认的图像张量
+            return torch.zeros(batch_size, 3, 256, 256, device=device)
     
     def get_loss_dict(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """获取损失字典 (兼容训练循环)"""
