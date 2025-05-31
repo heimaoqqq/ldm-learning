@@ -325,15 +325,20 @@ class FIDEvaluator:
         model.eval()
         generated_images = []
         
-        # 🔧 简化的进度显示
+        # 🔧 计算总批次数和创建进度条
         total_batches = (num_samples + batch_size - 1) // batch_size
-        print(f"  生成 {num_samples} 张图像用于FID评估...")
+        progress_bar = tqdm(
+            total=total_batches, 
+            desc=f"  FID生成({num_inference_steps}步)", 
+            unit="batch",
+            ncols=80,  # 控制进度条宽度
+            leave=False  # 完成后清除进度条
+        )
         
         # 生成样本
         with torch.no_grad():
             samples_per_class = num_samples // num_classes
             remaining_samples = num_samples % num_classes
-            batch_count = 0
             
             for class_id in range(num_classes):
                 # 每个类别生成相应数量的样本
@@ -353,16 +358,21 @@ class FIDEvaluator:
                     images = model.sample(
                         batch_size=current_batch_size,
                         class_labels=class_labels,
-                        num_inference_steps=num_inference_steps,
-                        guidance_scale=guidance_scale,
+                        num_inference_steps=num_inference_steps,  # 🔧 使用传入的推理步数
+                        guidance_scale=guidance_scale,  # 🔧 使用传入的引导强度
+                        verbose=False  # 🔧 关闭sample方法内部的详细输出
                     )
                     
                     generated_images.append(images.cpu())
-                    batch_count += 1
                     
-                    # 🔧 简化的进度显示 - 每20批显示一次（因为batch更大了）
-                    if batch_count % 20 == 0 or batch_count == total_batches:
-                        print(f"    进度: {batch_count}/{total_batches} 批次")
+                    # 🔧 更新进度条
+                    progress_bar.update(1)
+                    progress_bar.set_postfix({
+                        'class': f'{class_id+1}/{num_classes}',
+                        'samples': len(generated_images) * batch_size
+                    })
+        
+        progress_bar.close()  # 关闭进度条
         
         # 合并所有生成的图像
         all_generated = torch.cat(generated_images, dim=0)
