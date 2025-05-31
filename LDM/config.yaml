@@ -33,20 +33,20 @@ unet:
   # 输入维度
   in_channels: 256  # 潜在空间通道数，与VAE的latent_dim一致
   out_channels: 256  # 输出通道数 (预测噪声)
-  model_channels: 160  # 🎯 适中选择：介于128-192之间，保持表达能力
+  model_channels: 192  # 🔧 修复：192能被8,16,24,32等多种头数整除
   
   # 时间嵌入
-  time_embed_dim: 640  # 🎯 适中选择：介于512-768之间，保持时间表示能力
+  time_embed_dim: 768  # 🔧 修复：768 = 192 * 4，保持比例关系
   
   # 条件嵌入 (身份标签)
   num_classes: 31  # 类别数量 (ID_1到ID_31，共31个用户)
-  class_embed_dim: 320  # 🎯 适中选择：介于256-384之间，保持条件控制
+  class_embed_dim: 384  # 🔧 修复：384 = 192 * 2，保持比例关系
   
   # 网络层配置
   num_res_blocks: 3  # 🎯 保持3层，这对质量很重要
   attention_resolutions: [8, 16]  # 🎯 去掉最细粒度[4]，注意力很耗内存
   channel_mult: [1, 2, 4, 6]  # 🎯 降低最后一层：[1,2,4,8]→[1,2,4,6]
-  num_heads: 10  # 🎯 适中选择：介于8-12之间，保持注意力能力
+  num_heads: 8  # 🔧 修复：192能被8整除，192/8=24(每个头的维度)
   use_scale_shift_norm: true  # 使用条件归一化
   dropout: 0.1  # Dropout率
   
