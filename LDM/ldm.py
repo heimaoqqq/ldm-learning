@@ -15,8 +15,8 @@ from typing import Dict, Tuple, Optional, Any
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
 
 from adv_vq_vae import AdvVQVAE
-from unet import UNetModel  # 使用修复后的原始U-Net
-from scheduler import DDPMScheduler, DDIMScheduler  # 🆕 导入DDIM调度器
+from LDM.unet import UNetModel  # 使用修复后的原始U-Net
+from LDM.scheduler import DDPMScheduler, DDIMScheduler  # 🆕 导入DDIM调度器
 
 class LatentDiffusionModel(nn.Module):
     """
@@ -375,7 +375,7 @@ class LatentDiffusionModel(nn.Module):
         # 解码到图像空间
         try:
             images = self.decode_from_latent(latents)
-            
+        
             # 🔧 改进的归一化处理
             # 记录解码后的原始范围
             raw_min, raw_max = images.min().item(), images.max().item()
@@ -391,7 +391,7 @@ class LatentDiffusionModel(nn.Module):
             
             # 最终裁剪到[0,1]
             images = torch.clamp(images, 0.0, 1.0)
-            
+        
             # 🔧 质量检查
             final_min, final_max = images.min().item(), images.max().item()
             final_mean = images.mean().item()
