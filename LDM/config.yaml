@@ -2,7 +2,7 @@
 
 # VAE 相关配置 (使用预训练的VQ-VAE)
 vae:
-  model_path: "../VAE/adv_vqvae_best_fid.pth"  # 本地VAE模型路径
+  model_path: "/kaggle/input/vae-best-fid/adv_vqvae_best_fid.pth"  
   in_channels: 3
   latent_dim: 256  # VAE潜在维度
   num_embeddings: 512
