@@ -372,10 +372,6 @@ class LatentDiffusionModel(nn.Module):
                     )
                 
                 latents = result.prev_sample if hasattr(result, 'prev_sample') else result[0]
-                
-                # 🔧 定期打印进度
-                if i % (len(self.scheduler.timesteps) // 4) == 0:
-                    print(f"  📊 采样进度: {i+1}/{len(self.scheduler.timesteps)}")
                     
             except Exception as e:
                 print(f"⚠️ 采样步骤 {i} 出错: {e}")
@@ -409,8 +405,11 @@ class LatentDiffusionModel(nn.Module):
             if final_mean < 0.1 or final_mean > 0.9:
                 print(f"⚠️ 生成图像亮度异常: 均值={final_mean:.3f}")
             
-            print(f"✅ 采样完成，生成 {batch_size} 张图像")
-            print(f"   📊 最终图像范围: [{final_min:.3f}, {final_max:.3f}], 均值: {final_mean:.3f}")
+            # 🔧 简化采样完成日志 - 只在单独采样时详细显示
+            if batch_size <= 4:  # 小批次时显示详细信息
+                print(f"✅ 采样完成，生成 {batch_size} 张图像")
+                print(f"   📊 最终图像范围: [{final_min:.3f}, {final_max:.3f}], 均值: {final_mean:.3f}")
+            
             return images
             
         except Exception as e:
