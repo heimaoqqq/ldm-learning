@@ -534,12 +534,16 @@ def train_ldm():
                 # 🆕 使用配置的FID评估参数
                 num_samples = config['fid_evaluation'].get('num_samples', 2048)
                 batch_size = config['fid_evaluation'].get('batch_size', 3)
+                num_inference_steps = config['inference'].get('num_inference_steps', 250)  # 🔧 从配置读取推理步数
+                guidance_scale = config['inference'].get('guidance_scale', 7.5)  # 🔧 从配置读取引导强度
                 
                 fid_score = fid_evaluator.evaluate_model(
                     model, 
                     num_samples=num_samples,
                     batch_size=batch_size,
-                    num_classes=config['unet']['num_classes']
+                    num_classes=config['unet']['num_classes'],
+                    num_inference_steps=num_inference_steps,  # 🔧 使用配置的推理步数
+                    guidance_scale=guidance_scale  # 🔧 使用配置的引导强度
                 )
                 fid_time = time.time() - fid_start_time
                 
