@@ -182,10 +182,12 @@ class DDPMSchedulerOutput:
 class DDIMScheduler(DDPMScheduler):
     """
     DDIM调度器，用于快速采样
+    支持标准DDIM (eta=0) 和改进的自适应eta
     """
-    def __init__(self, eta: float = 0.0, **kwargs):
+    def __init__(self, eta: float = 0.0, adaptive_eta: bool = False, **kwargs):
         super().__init__(**kwargs)
         self.eta = eta
+        self.adaptive_eta = adaptive_eta  # 🆕 是否使用自适应eta
     
     def step(
         self,
@@ -199,6 +201,7 @@ class DDIMScheduler(DDPMScheduler):
     ):
         """
         DDIM采样步骤
+        支持标准eta和改进的自适应eta
         """
         if eta is None:
             eta = self.eta
@@ -219,15 +222,22 @@ class DDIMScheduler(DDPMScheduler):
         if self.clip_denoised:
             pred_original_sample = torch.clamp(pred_original_sample, -1, 1)
         
-        # 4. 计算方向指向当前样本的"方向"
-        pred_sample_direction = (1 - alpha_prod_t_prev - eta * self._get_variance(timestep, prev_timestep)) ** (0.5) * model_output
+        # 4. 🆕 计算方差 - 支持自适应eta
+        if self.adaptive_eta and eta > 0:
+            # 使用论文中的改进公式: σ_τᵢ(η) = η√((1-α_τᵢ₋₁)/(1-α_τᵢ))√(1-α_τᵢ/α_τᵢ₋₁)
+            variance = self._get_adaptive_variance(timestep, prev_timestep, eta)
+        else:
+            # 标准DDIM方差
+            variance = self._get_variance(timestep, prev_timestep)
         
-        # 5. 计算前一样本
+        # 5. 计算方向指向当前样本的"方向"
+        pred_sample_direction = (1 - alpha_prod_t_prev - eta * variance) ** (0.5) * model_output
+        
+        # 6. 计算前一样本
         pred_prev_sample = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
         
-        # 6. 添加噪声
+        # 7. 添加噪声
         if eta > 0:
-            variance = self._get_variance(timestep, prev_timestep)
             device = model_output.device
             noise = torch.randn(model_output.shape, generator=generator, device=device, dtype=model_output.dtype)
             pred_prev_sample = pred_prev_sample + (eta * variance) ** (0.5) * noise
@@ -238,10 +248,29 @@ class DDIMScheduler(DDPMScheduler):
         return DDPMSchedulerOutput(prev_sample=pred_prev_sample, pred_original_sample=pred_original_sample)
     
     def _get_variance(self, timestep, prev_timestep):
+        """标准DDIM方差计算"""
         alpha_prod_t = self.alphas_cumprod[timestep]
         alpha_prod_t_prev = self.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else torch.tensor(1.0)
         beta_prod_t = 1 - alpha_prod_t
         beta_prod_t_prev = 1 - alpha_prod_t_prev
         
         variance = (beta_prod_t_prev / beta_prod_t) * (1 - alpha_prod_t / alpha_prod_t_prev)
-        return variance 
+        return variance
+    
+    def _get_adaptive_variance(self, timestep, prev_timestep, eta):
+        """
+        🆕 改进的自适应方差计算
+        基于论文公式: σ_τᵢ(η) = η√((1-α_τᵢ₋₁)/(1-α_τᵢ))√(1-α_τᵢ/α_τᵢ₋₁)
+        优化为: σ_τᵢ(η) = η√((1-α_τᵢ₋₁)(α_τᵢ₋₁-α_τᵢ)/(α_τᵢ₋₁(1-α_τᵢ)))
+        """
+        alpha_prod_t = self.alphas_cumprod[timestep]           # α_τᵢ
+        alpha_prod_t_prev = self.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else torch.tensor(1.0)  # α_τᵢ₋₁
+        
+        # 使用优化的单个平方根公式
+        # η√((1-α_τᵢ₋₁)(α_τᵢ₋₁-α_τᵢ)/(α_τᵢ₋₁(1-α_τᵢ)))
+        numerator = (1 - alpha_prod_t_prev) * (alpha_prod_t_prev - alpha_prod_t)
+        denominator = alpha_prod_t_prev * (1 - alpha_prod_t)
+        
+        adaptive_variance = eta * torch.sqrt(numerator / denominator)
+        
+        return adaptive_variance 
