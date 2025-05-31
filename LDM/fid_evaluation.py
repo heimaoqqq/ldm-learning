@@ -303,7 +303,8 @@ class FIDEvaluator:
         return fid_score
     
     def evaluate_model(self, model, num_samples: int = 1000, 
-                      batch_size: int = 8, num_classes: int = 31) -> float:
+                      batch_size: int = 8, num_classes: int = 31,
+                      num_inference_steps: int = 250, guidance_scale: float = 7.5) -> float:
         """
         评估模型的FID分数
         
@@ -312,6 +313,8 @@ class FIDEvaluator:
             num_samples: 生成样本数
             batch_size: 批量大小
             num_classes: 类别数
+            num_inference_steps: DDIM推理步数
+            guidance_scale: CFG引导强度
         
         Returns:
             FID分数
@@ -322,10 +325,15 @@ class FIDEvaluator:
         model.eval()
         generated_images = []
         
+        # 🔧 简化的进度显示
+        total_batches = (num_samples + batch_size - 1) // batch_size
+        print(f"  生成 {num_samples} 张图像用于FID评估...")
+        
         # 生成样本
         with torch.no_grad():
             samples_per_class = num_samples // num_classes
             remaining_samples = num_samples % num_classes
+            batch_count = 0
             
             for class_id in range(num_classes):
                 # 每个类别生成相应数量的样本
@@ -345,14 +353,20 @@ class FIDEvaluator:
                     images = model.sample(
                         batch_size=current_batch_size,
                         class_labels=class_labels,
-                        num_inference_steps=50,
-                        guidance_scale=7.5,
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=guidance_scale,
                     )
                     
                     generated_images.append(images.cpu())
+                    batch_count += 1
+                    
+                    # 🔧 简化的进度显示 - 每20批显示一次（因为batch更大了）
+                    if batch_count % 20 == 0 or batch_count == total_batches:
+                        print(f"    进度: {batch_count}/{total_batches} 批次")
         
         # 合并所有生成的图像
         all_generated = torch.cat(generated_images, dim=0)
+        print(f"  计算FID分数...")
         
         # 计算FID
         fid_score = self.calculate_fid_score(all_generated)
