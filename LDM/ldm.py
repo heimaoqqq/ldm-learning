@@ -15,8 +15,18 @@ from typing import Dict, Tuple, Optional, Any
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
 
 from adv_vq_vae import AdvVQVAE
-from LDM.unet import UNetModel  # 使用修复后的原始U-Net
-from LDM.scheduler import DDPMScheduler, DDIMScheduler  # 🆕 导入DDIM调度器
+
+# 🔧 兼容多种运行环境的导入方式
+try:
+    from .unet import UNetModel
+    from .scheduler import DDPMScheduler, DDIMScheduler
+except ImportError:
+    # 当作为脚本直接运行时的fallback
+    import sys
+    import os
+    sys.path.append(os.path.dirname(__file__))
+    from unet import UNetModel
+    from scheduler import DDPMScheduler, DDIMScheduler
 
 class LatentDiffusionModel(nn.Module):
     """
