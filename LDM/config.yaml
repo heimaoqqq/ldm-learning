@@ -104,7 +104,7 @@ fid_evaluation:
 
 # 推理配置
 inference:
-  num_inference_steps: 50  # 🚀 减少推理步数，更快生成
+  num_inference_steps: 250  # 🚀 减少推理步数，更快生成
   guidance_scale: 7.5
   eta: 0.0  # DDIM确定性采样
   
