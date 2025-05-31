@@ -71,7 +71,7 @@ training:
   # 保存设置
   save_dir: "fid_optimized_models"
   save_interval: 50
-  sample_interval: 1  # 🎯 更频繁生成样本监控
+  sample_interval: 30  # 🎯 更频繁生成样本监控
   log_interval: 20
   
   # 损失配置 - 混合损失
@@ -97,7 +97,7 @@ training:
 # FID评估配置 - 高精度评估
 fid_evaluation:
   enabled: true
-  eval_interval: 1  # 🚀 降低评估频率：25->50 epoch
+  eval_interval: 30  # 🚀 降低评估频率：25->30 epoch
   num_samples: 1000  # 🚀 减少样本数：5000->1000
   batch_size: 32     # 🚀 增大batch size：20->32  
   max_real_samples: 1000  # 🚀 减少真实样本数：5000->1000
