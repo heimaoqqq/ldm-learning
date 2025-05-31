@@ -97,7 +97,7 @@ training:
 # FID评估配置 - 高精度评估
 fid_evaluation:
   enabled: true
-  eval_interval: 25  # 🎯 频繁评估监控进展
+  eval_interval: 1  # 🎯 频繁评估监控进展
   num_samples: 5000  # 🎯 大量样本确保准确性
   batch_size: 20     # 🎯 平衡速度和精度
   max_real_samples: 5000
