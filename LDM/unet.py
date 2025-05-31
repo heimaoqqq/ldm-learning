@@ -228,7 +228,7 @@ class AttentionBlock(nn.Module):
         self.head_size = channels // self.num_heads
 
         self.norm = nn.GroupNorm(num_groups=num_groups, num_channels=channels, eps=1e-6, affine=True)
-
+        
         # 简化的注意力投影
         encoder_hidden_states_channels = encoder_hidden_states_channels or channels
         self.to_q = nn.Linear(channels, channels, bias=False)
@@ -296,11 +296,11 @@ class AttentionBlock(nn.Module):
     ) -> torch.Tensor:
         batch, channel, height, width = hidden_states.shape
         residual = hidden_states
-
+        
         # 如果没有提供编码器隐藏状态，使用self-attention
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states.view(batch, channel, height * width).transpose(1, 2)
-
+        
         # 标准化
         normalized = self.norm(hidden_states)
         
@@ -599,7 +599,7 @@ class UNetModel(nn.Module):
                         h = layer(h, encoder_hidden_states)
                     else:
                         h = layer(h)
-                    
+
                     # 🔧 检查中间层输出
                     if torch.any(torch.isnan(h)) or torch.any(torch.isinf(h)):
                         print(f"⚠️ 中间层{layer_idx}输出异常")
@@ -631,7 +631,7 @@ class UNetModel(nn.Module):
                                 h = layer(h, encoder_hidden_states)
                             else:
                                 h = layer(h)
-                            
+
                             # 🔧 检查上采样层输出
                             if torch.any(torch.isnan(h)) or torch.any(torch.isinf(h)):
                                 print(f"⚠️ 上采样模块{module_idx}层{layer_idx}输出异常")
