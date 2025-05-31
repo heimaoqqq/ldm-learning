@@ -1,138 +1,130 @@
-# LDM (Latent Diffusion Model) 配置文件
+# LDM (Latent Diffusion Model) 配置文件 - 基于Stable Diffusion轻量化版本
 
 # VAE 相关配置 (使用预训练的VQ-VAE)
 vae:
-  model_path: "/kaggle/input/vae-best-fid/adv_vqvae_best_fid.pth"  # Kaggle VAE模型路径
+  model_path: "../VAE/adv_vqvae_best_fid.pth"  # 本地VAE模型路径
   in_channels: 3
-  latent_dim: 256
+  latent_dim: 256  # VAE潜在维度
   num_embeddings: 512
   beta: 0.25
   vq_ema_decay: 0.99
   groups: 32
   freeze: true  # 冻结VAE参数
+  # VAE输出信息（用于U-Net适配）
+  latent_height: 32  # 256/8 = 32
+  latent_width: 32
+  latent_channels: 256
 
 # 数据集配置
 dataset:
   root_dir: "/kaggle/input/dataset"  # Kaggle数据集路径
-  batch_size: 6  # 🎯 平衡点：保持合理batch size但避免OOM
-  num_workers: 2  # 保持2个workers减少CPU内存占用
+  batch_size: 8  # 🚀 轻量化后可以增大batch size
+  num_workers: 2
   val_split: 0.2
   image_size: 256
 
 # 扩散模型配置
 diffusion:
-  timesteps: 1000  # 训练时总扩散步数
-  noise_schedule: "cosine"  # 🎯 保持余弦调度
-  beta_start: 0.00085  # 🎯 较小起始值
-  beta_end: 0.012  # 🎯 较小终止值
-  scheduler_type: "ddim"  # 🆕 使用DDIM调度器 (ddpm/ddim)
+  timesteps: 1000
+  noise_schedule: "scaled_linear"  # 🔧 SD使用的调度
+  beta_start: 0.00085
+  beta_end: 0.012
+  scheduler_type: "ddim"
   clip_denoised: true
+  prediction_type: "epsilon"  # 预测噪声
 
-# U-Net 网络结构配置
+# U-Net 网络结构配置 (基于Stable Diffusion轻量化)
 unet:
-  # 输入维度
-  in_channels: 256  # 潜在空间通道数，与VAE的latent_dim一致
-  out_channels: 256  # 输出通道数 (预测噪声)
-  model_channels: 192  # 🔧 修复：192能被8,16,24,32等多种头数整除
+  # 输入输出维度
+  in_channels: 256  # 匹配VAE潜在通道数
+  out_channels: 256  # 预测噪声
+  
+  # 基础模型配置
+  model_channels: 128  # 🚀 大幅简化：320->128
+  num_res_blocks: 2  # 🚀 减少ResNet块：3->2
+  attention_resolutions: [4, 2]  # 🚀 简化注意力层
+  channel_mult: [1, 2, 4]  # 🚀 简化通道倍数：[1,2,4,8]->[1,2,4]
+  
+  # 注意力配置
+  num_head_channels: 32  # 🚀 减少注意力头维度
+  use_spatial_transformer: true  # 使用空间transformer
+  transformer_depth: 1  # 🚀 单层transformer
+  
+  # 条件嵌入
+  num_classes: 31  # 类别数量
+  use_fp16: true  # 🚀 启用半精度
   
   # 时间嵌入
-  time_embed_dim: 768  # 🔧 修复：768 = 192 * 4，保持比例关系
-  
-  # 条件嵌入 (身份标签)
-  num_classes: 31  # 类别数量 (ID_1到ID_31，共31个用户)
-  class_embed_dim: 384  # 🔧 修复：384 = 192 * 2，保持比例关系
-  
-  # 网络层配置
-  num_res_blocks: 3  # 🎯 保持3层，这对质量很重要
-  attention_resolutions: [8, 16]  # 🎯 去掉最细粒度[4]，注意力很耗内存
-  channel_mult: [1, 2, 4, 6]  # 🎯 降低最后一层：[1,2,4,8]→[1,2,4,6]
-  num_heads: 8  # 🔧 修复：192能被8整除，192/8=24(每个头的维度)
-  use_scale_shift_norm: true  # 使用条件归一化
-  dropout: 0.1  # Dropout率
-  
-  # 条件机制
-  use_cross_attention: true  # 🎯 保持交叉注意力，这对条件生成很重要
-  use_self_attention: true   # 🎯 保持自注意力
+  time_embed_dim: 512  # 128 * 4
 
 # 训练配置
 training:
-  epochs: 500
-  lr: 0.000005  # 🔧 进一步降低学习率，防止数值爆炸
+  epochs: 200  # 🚀 减少训练轮数，更快收敛
+  lr: 0.0001  # 🚀 提高学习率，轻量模型更容易训练
   weight_decay: 0.01
-  warmup_steps: 2000  # 🔧 增加预热步数，更稳定的开始
+  warmup_steps: 1000
   
-  # 🆕 梯度累积配置
-  gradient_accumulation_steps: 1  # 🔧 先用1步累积，稳定后再增加
+  # 梯度累积
+  gradient_accumulation_steps: 1
   
   # 保存设置
-  save_dir: "ldm_models"
-  save_interval: 50  # 每隔多少epoch保存一次
-  sample_interval: 15  # 🎯 略微降低采样频率节省内存
-  log_interval: 100  # 每隔多少步打印日志
+  save_dir: "sd_ldm_models"
+  save_interval: 25  # 更频繁保存
+  sample_interval: 10  # 更频繁生成样本
+  log_interval: 50
   
-  # 损失权重
-  noise_loss_weight: 1.0
+  # 损失配置
+  loss_type: "l2"  # MSE损失
   
   # Classifier-Free Guidance
-  use_cfg: true  # 使用无分类器引导
-  cfg_dropout_prob: 0.1  # 🔧 降低CFG dropout，减少训练困难
+  use_cfg: true
+  cfg_dropout_prob: 0.15  # SD典型值
+  
+  # 优化器配置
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1e-8
   
   # 梯度裁剪
-  grad_clip_norm: 0.2  # 🔧 更严格的梯度裁剪
+  grad_clip_norm: 1.0
   
   # 调度器
   use_scheduler: true
-  scheduler_type: "cosine_with_restarts"  # 🎯 保持优化调度器
+  scheduler_type: "cosine"
 
 # FID评估配置
 fid_evaluation:
-  enabled: true  # 🎯 保持FID评估监控质量
-  eval_interval: 1  # 🎯 高的评估频率
-  num_samples: 1024  # 🎯 适中的样本数，平衡准确性和内存
-  batch_size: 1  # 🔧 配合推理batch_size调整为1
-  max_real_samples: 1024  # 🎯 适中的真实样本数
-  save_best_fid_model: true  # 保存最佳FID模型
+  enabled: true
+  eval_interval: 5  # 每5个epoch评估
+  num_samples: 1000  # 🚀 减少样本数，快速评估
+  batch_size: 16  # 更大的batch size
+  max_real_samples: 1000
+  save_best_fid_model: true
 
 # 推理配置
 inference:
-  num_inference_steps: 250  # 🔧 提高DDIM步数到250，获得更高质量
-  guidance_scale: 7.5  # CFG引导强度
-  eta: 0.3  # 🆕 使用中等eta值，平衡质量和多样性 (0=确定性, 1=随机)
-  adaptive_eta: true  # 🆕 启用改进的自适应eta
+  num_inference_steps: 50  # 🚀 减少推理步数，更快生成
+  guidance_scale: 7.5
+  eta: 0.0  # DDIM确定性采样
   
   # 采样配置
-  sample_batch_size: 1  # 🔧 修改为仅生成1张图片
-  num_samples_per_class: 1  # 🔧 每个类别只生成1个样本
-  
-  # 🆕 归一化配置
-  normalization:
-    # 数据范围定义
-    data_range: [0, 1]        # 原始图像像素范围
-    vae_input_range: [-1, 1]  # VAE输入范围（经过预处理）
-    vae_output_range: [-1, 1] # VAE输出范围（tanh激活）
-    final_output_range: [0, 1] # 最终输出图像范围
-    
-    # 数值稳定性配置
-    latent_clamp_range: [-5, 5]    # 潜在表示裁剪范围
-    latent_std_threshold: 3.0      # 潜在表示标准差阈值
-    enable_range_checking: true    # 启用范围检查
-    enable_adaptive_norm: true     # 启用自适应归一化
-    
-    # VAE解码安全性
-    vae_decode_clamp: true         # 启用VAE解码输出裁剪
-    vae_decode_range: [-1.1, 1.1] # VAE解码输出安全范围
+  sample_batch_size: 4
+  num_samples_per_class: 2
   
   # 输出设置
   output_dir: "generated_samples"
   save_format: "png"
 
 # 设备配置
-device: "auto"  # auto, cpu, cuda
-mixed_precision: true  # 🎯 启用混合精度训练节省内存
+device: "auto"
+mixed_precision: true
+use_ema: true  # 🚀 使用EMA提高生成质量
+ema_decay: 0.9999
 
 # 日志配置
 logging:
-  use_wandb: false  # 是否使用wandb
-  project_name: "LDM-Gait"
-  experiment_name: "ldm_micro_doppler_32x32_latent"  # 微多普勒特征图实验
+  use_wandb: false
+  project_name: "SD-LDM-Gait"
+  experiment_name: "sd_ldm_lightweight"
   log_dir: "logs" 
