@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 import torchvision.utils as vutils
 from typing import Dict, Any
 import json
+import shutil  # 🆕 添加shutil用于删除目录
 
 # 添加路径
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
@@ -379,13 +380,19 @@ def train_fid_optimized():
                     best_fid = fid_score
                     training_log['best_fid_epoch'] = epoch + 1
                     best_fid_model_path = os.path.join(save_dir, 'best_fid_model')
+                    
+                    # 🆕 删除旧的最佳FID模型
+                    if os.path.exists(best_fid_model_path):
+                        shutil.rmtree(best_fid_model_path)
+                        print(f"🗑️  删除旧的最佳FID模型")
+                    
                     save_model_checkpoint(
                         model, 
                         best_fid_model_path, 
                         epoch=epoch+1, 
                         extra_info={'fid_score': fid_score, 'best_fid': True}
                     )
-                    print(f"🎉 新FID最佳模型已保存!")
+                    print(f"🎉 新FID最佳模型已保存! (FID: {best_fid:.2f})")
                     
                     # 如果达到目标FID
                     if fid_score < 20:
@@ -409,12 +416,19 @@ def train_fid_optimized():
         if avg_val_loss < best_loss:
             best_loss = avg_val_loss
             best_model_path = os.path.join(save_dir, 'best_loss_model')
+            
+            # 🆕 删除旧的最佳损失模型
+            if os.path.exists(best_model_path):
+                shutil.rmtree(best_model_path)
+                print(f"🗑️  删除旧的最佳损失模型")
+            
             save_model_checkpoint(
                 model, 
                 best_model_path, 
                 epoch=epoch+1, 
                 extra_info={'val_loss': best_loss, 'best_loss': True}
             )
+            print(f"💾 新最佳损失模型已保存! (Loss: {best_loss:.4f})")
         
         # 定期保存checkpoint
         if (epoch + 1) % config['training']['save_interval'] == 0:
