@@ -2,7 +2,7 @@
 
 # VAE 相关配置 (使用预训练的VQ-VAE)
 vae:
-  model_path: "/kaggle/input/vae-best-fid/adv_vqvae_best_fid.pth"  
+  model_path: "../VAE/adv_vqvae_best_fid.pth"  # 本地VAE模型路径
   in_channels: 3
   latent_dim: 256  # VAE潜在维度
   num_embeddings: 512
@@ -18,8 +18,8 @@ vae:
 # 数据集配置
 dataset:
   root_dir: "/kaggle/input/dataset"  # Kaggle数据集路径
-  batch_size: 8  # 🚀 轻量化后可以增大batch size
-  num_workers: 2
+  batch_size: 32  # 🚀 大幅增加：8->32 (16GB显存优化)
+  num_workers: 4  # 🚀 增加数据加载并行度
   val_split: 0.2
   image_size: 256
 
@@ -39,30 +39,30 @@ unet:
   in_channels: 256  # 匹配VAE潜在通道数
   out_channels: 256  # 预测噪声
   
-  # 基础模型配置
-  model_channels: 128  # 🚀 大幅简化：320->128
-  num_res_blocks: 2  # 🚀 减少ResNet块：3->2
-  attention_resolutions: [4, 2]  # 🚀 简化注意力层
-  channel_mult: [1, 2, 4]  # 🚀 简化通道倍数：[1,2,4,8]->[1,2,4]
+  # 基础模型配置 - 16GB显存优化
+  model_channels: 192  # 🚀 增强模型：128->192
+  num_res_blocks: 3  # 🚀 增加ResNet块：2->3
+  attention_resolutions: [8, 4, 2]  # 🚀 增加注意力层：[4,2]->[8,4,2]
+  channel_mult: [1, 2, 4, 6]  # 🚀 增强通道倍数：[1,2,4]->[1,2,4,6]
   
   # 注意力配置
-  num_head_channels: 32  # 🚀 减少注意力头维度
+  num_head_channels: 64  # 🚀 增加注意力头维度：32->64
   use_spatial_transformer: true  # 使用空间transformer
-  transformer_depth: 1  # 🚀 单层transformer
+  transformer_depth: 2  # 🚀 增加transformer层：1->2
   
   # 条件嵌入
   num_classes: 31  # 类别数量
   use_fp16: true  # 🚀 启用半精度
   
   # 时间嵌入
-  time_embed_dim: 512  # 128 * 4
+  time_embed_dim: 768  # 192 * 4 (增大嵌入维度)
 
 # 训练配置
 training:
   epochs: 200  # 🚀 减少训练轮数，更快收敛
-  lr: 0.0001  # 🚀 提高学习率，轻量模型更容易训练
+  lr: 0.0002  # 🚀 适应更大batch size的学习率
   weight_decay: 0.01
-  warmup_steps: 1000
+  warmup_steps: 2000  # 🚀 增加warmup步数
   
   # 梯度累积
   gradient_accumulation_steps: 1
@@ -97,20 +97,20 @@ training:
 fid_evaluation:
   enabled: true
   eval_interval: 5  # 每5个epoch评估
-  num_samples: 1000  # 🚀 减少样本数，快速评估
-  batch_size: 16  # 更大的batch size
-  max_real_samples: 1000
+  num_samples: 2000  # 🚀 增加样本数：1000->2000
+  batch_size: 32  # 🚀 增大FID评估batch size：16->32
+  max_real_samples: 2000  # 🚀 增加真实样本数
   save_best_fid_model: true
 
 # 推理配置
 inference:
-  num_inference_steps: 250  # 🚀 减少推理步数，更快生成
+  num_inference_steps: 100  # 🚀 减少推理步数，更快生成
   guidance_scale: 7.5
   eta: 0.0  # DDIM确定性采样
   
-  # 采样配置
-  sample_batch_size: 4
-  num_samples_per_class: 2
+  # 采样配置 - 16GB显存优化
+  sample_batch_size: 16  # 🚀 增大推理batch size：4->16
+  num_samples_per_class: 4  # 🚀 每类生成更多样本：2->4
   
   # 输出设置
   output_dir: "generated_samples"
