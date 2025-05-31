@@ -16,7 +16,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
 
 from adv_vq_vae import AdvVQVAE
 from unet import UNetModel  # 使用修复后的原始U-Net
-from scheduler import DDPMScheduler
+from scheduler import DDPMScheduler, DDIMScheduler  # 🆕 导入DDIM调度器
 
 class LatentDiffusionModel(nn.Module):
     """
@@ -31,13 +31,23 @@ class LatentDiffusionModel(nn.Module):
         # 初始化VAE (预训练，冻结参数)
         self.vae = self._init_vae(config['vae'])
         
-        # 初始化扩散调度器
-        self.scheduler = DDPMScheduler(
-            num_train_timesteps=config['diffusion']['timesteps'],
-            beta_start=config['diffusion']['beta_start'],
-            beta_end=config['diffusion']['beta_end'],
-            beta_schedule=config['diffusion']['noise_schedule']
-        )
+        # 初始化扩散调度器 - 🆕 支持DDIM和改进eta
+        if config['diffusion'].get('scheduler_type', 'ddpm') == 'ddim':
+            self.scheduler = DDIMScheduler(
+                num_train_timesteps=config['diffusion']['timesteps'],
+                beta_start=config['diffusion']['beta_start'],
+                beta_end=config['diffusion']['beta_end'],
+                beta_schedule=config['diffusion']['noise_schedule'],
+                eta=config['inference'].get('eta', 0.0),
+                adaptive_eta=config['inference'].get('adaptive_eta', False)
+            )
+        else:
+            self.scheduler = DDPMScheduler(
+                num_train_timesteps=config['diffusion']['timesteps'],
+                beta_start=config['diffusion']['beta_start'],
+                beta_end=config['diffusion']['beta_end'],
+                beta_schedule=config['diffusion']['noise_schedule']
+            )
         
         # 初始化U-Net
         self.unet = UNetModel(**config['unet'])
