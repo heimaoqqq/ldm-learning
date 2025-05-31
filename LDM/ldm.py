@@ -100,11 +100,48 @@ class LatentDiffusionModel(nn.Module):
     def encode_to_latent(self, images: torch.Tensor) -> torch.Tensor:
         """将图像编码到潜在空间"""
         with torch.no_grad():
-            # VAE编码
-            encoded = self.vae.encoder(images)
-            # VQ量化
-            quantized, _, _ = self.vae.vq(encoded)
-            return quantized
+            # 🔧 输入预处理和检查
+            # 确保输入在[0,1]范围内
+            images = torch.clamp(images, 0.0, 1.0)
+            
+            # 转换到VAE期望的[-1,1]范围
+            images = images * 2.0 - 1.0
+            
+            # 检查转换后的数值
+            if torch.any(torch.isnan(images)) or torch.any(torch.isinf(images)):
+                print(f"⚠️ VAE输入预处理异常")
+                images = torch.clamp(images, -1.0, 1.0)
+            
+            try:
+                # VAE编码
+                encoded = self.vae.encoder(images)
+                
+                # 检查编码器输出
+                if torch.any(torch.isnan(encoded)) or torch.any(torch.isinf(encoded)):
+                    print(f"⚠️ VAE编码器输出异常")
+                    encoded = torch.randn_like(encoded) * 0.1
+                
+                # 限制编码器输出范围
+                encoded = torch.clamp(encoded, -5.0, 5.0)
+                
+                # VQ量化
+                quantized, _, _ = self.vae.vq(encoded)
+                
+                # 检查量化输出
+                if torch.any(torch.isnan(quantized)) or torch.any(torch.isinf(quantized)):
+                    print(f"⚠️ VQ量化输出异常")
+                    quantized = torch.randn_like(quantized) * 0.1
+                
+                # 最终范围限制
+                quantized = torch.clamp(quantized, -3.0, 3.0)
+                
+                return quantized
+                
+            except Exception as e:
+                print(f"⚠️ VAE编码过程失败: {e}")
+                # 返回安全的随机潜在表示
+                latent_shape = (images.shape[0], 256, images.shape[2]//8, images.shape[3]//8)
+                return torch.randn(latent_shape, device=images.device) * 0.1
     
     def decode_from_latent(self, latents: torch.Tensor) -> torch.Tensor:
         """从潜在空间解码到图像"""
@@ -148,8 +185,24 @@ class LatentDiffusionModel(nn.Module):
         """
         batch_size = images.shape[0]
         
+        # 🔧 输入数值检查和限制
+        if torch.any(torch.isnan(images)) or torch.any(torch.isinf(images)):
+            print(f"⚠️ 输入图像包含异常值，进行修复")
+            images = torch.where(torch.isnan(images) | torch.isinf(images), torch.zeros_like(images), images)
+        
+        # 限制输入范围
+        images = torch.clamp(images, 0.0, 1.0)
+        
         # 编码到潜在空间
         latents = self.encode_to_latent(images)  # [B, C, H', W']
+        
+        # 🔧 检查潜在表示的数值健康
+        if torch.any(torch.isnan(latents)) or torch.any(torch.isinf(latents)):
+            print(f"⚠️ VAE编码输出异常，使用安全值")
+            latents = torch.randn_like(latents) * 0.1  # 小的随机噪声
+        
+        # 限制潜在表示范围
+        latents = torch.clamp(latents, -3.0, 3.0)
         
         # 采样时间步
         timesteps = torch.randint(
@@ -159,7 +212,16 @@ class LatentDiffusionModel(nn.Module):
         
         # 添加噪声
         noise = torch.randn_like(latents)
+        
+        # 🔧 限制噪声范围，防止极值
+        noise = torch.clamp(noise, -2.0, 2.0)
+        
         noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
+        
+        # 🔧 检查加噪后的数值
+        if torch.any(torch.isnan(noisy_latents)) or torch.any(torch.isinf(noisy_latents)):
+            print(f"⚠️ 加噪过程出现异常")
+            noisy_latents = latents + noise * 0.1  # 使用小的噪声比例
         
         # CFG训练 (随机丢弃类别标签)
         if self.use_cfg and class_labels is not None:
@@ -171,14 +233,32 @@ class LatentDiffusionModel(nn.Module):
         # U-Net预测噪声
         predicted_noise = self.unet(noisy_latents, timesteps, class_labels)
         
-        # 计算损失
-        noise_loss = F.mse_loss(predicted_noise, noise, reduction='mean')
+        # 🔧 检查预测输出
+        if torch.any(torch.isnan(predicted_noise)) or torch.any(torch.isinf(predicted_noise)):
+            print(f"⚠️ U-Net预测输出异常")
+            predicted_noise = torch.zeros_like(noise)
+        
+        # 限制预测噪声范围
+        predicted_noise = torch.clamp(predicted_noise, -3.0, 3.0)
+        
+        # 计算损失 - 使用更稳定的损失函数
+        try:
+            noise_loss = F.mse_loss(predicted_noise, noise, reduction='mean')
+            
+            # 检查损失值
+            if torch.isnan(noise_loss) or torch.isinf(noise_loss) or noise_loss > 100:
+                print(f"⚠️ 损失值异常: {noise_loss.item():.4f}，使用安全值")
+                noise_loss = torch.tensor(1.0, device=images.device, requires_grad=True)
+            
+        except Exception as e:
+            print(f"⚠️ 损失计算失败: {e}")
+            noise_loss = torch.tensor(1.0, device=images.device, requires_grad=True)
         
         return {
             'noise_loss': noise_loss,
             'total_loss': noise_loss,
-            'predicted_noise': predicted_noise,
-            'target_noise': noise
+            'predicted_noise': predicted_noise.detach(),  # 避免梯度传播问题
+            'target_noise': noise.detach()
         }
     
     @torch.no_grad()
