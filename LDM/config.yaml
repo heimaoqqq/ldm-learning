@@ -96,7 +96,7 @@ training:
 # FID评估配置
 fid_evaluation:
   enabled: true
-  eval_interval: 5  # 每5个epoch评估
+  eval_interval: 20  # 每20个epoch评估
   num_samples: 2000  # 🚀 增加样本数：1000->2000
   batch_size: 32  # 🚀 增大FID评估batch size：16->32
   max_real_samples: 2000  # 🚀 增加真实样本数
