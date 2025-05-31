@@ -71,7 +71,7 @@ training:
   # 保存设置
   save_dir: "fid_optimized_models"
   save_interval: 50
-  sample_interval: 25  # 🎯 更频繁生成样本监控
+  sample_interval: 1  # 🎯 更频繁生成样本监控
   log_interval: 20
   
   # 损失配置 - 混合损失
@@ -85,7 +85,7 @@ training:
   optimizer: "adamw"
   beta1: 0.9
   beta2: 0.999
-  eps: 0.00000001
+  eps: 1e-8
   
   # 梯度裁剪
   grad_clip_norm: 0.5  # 🎯 更严格的梯度裁剪
@@ -97,16 +97,16 @@ training:
 # FID评估配置 - 高精度评估
 fid_evaluation:
   enabled: true
-  eval_interval: 1  # 🎯 频繁评估监控进展
-  num_samples: 5000  # 🎯 大量样本确保准确性
-  batch_size: 20     # 🎯 平衡速度和精度
-  max_real_samples: 5000
+  eval_interval: 1  # 🚀 降低评估频率：25->50 epoch
+  num_samples: 1000  # 🚀 减少样本数：5000->1000
+  batch_size: 32     # 🚀 增大batch size：20->32  
+  max_real_samples: 1000  # 🚀 减少真实样本数：5000->1000
   save_best_fid_model: true
 
 # 推理配置 - 高质量采样
 inference:
-  num_inference_steps: 250  # 🎯 大幅增加推理步数
-  guidance_scale: 12.0      # 🎯 更强的条件引导
+  num_inference_steps: 50   # 🚀 大幅减少：250->50步
+  guidance_scale: 7.5       # 🚀 降低CFG强度：12.0->7.5
   eta: 0.0  # DDIM确定性采样
   
   # 采样配置
