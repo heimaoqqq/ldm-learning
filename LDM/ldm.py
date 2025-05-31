@@ -278,7 +278,8 @@ class LatentDiffusionModel(nn.Module):
         class_labels: Optional[torch.Tensor] = None,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
-        eta: Optional[float] = None  # 🔧 改为可选参数，默认使用调度器配置
+        eta: Optional[float] = None,  # 🔧 改为可选参数，默认使用调度器配置
+        verbose: bool = True  # 🔧 新增参数控制详细输出
     ) -> torch.Tensor:
         """
         DDIM/DDPM采样生成图像
@@ -289,6 +290,7 @@ class LatentDiffusionModel(nn.Module):
             num_inference_steps: 推理步数
             guidance_scale: CFG引导强度
             eta: DDIM参数 (None=使用调度器默认值, 0=确定性采样)
+            verbose: 是否显示详细日志
             
         Returns:
             生成的图像 [batch_size, 3, H, W]
@@ -305,10 +307,12 @@ class LatentDiffusionModel(nn.Module):
         # 🔧 检查调度器类型和eta兼容性
         is_ddim = isinstance(self.scheduler, DDIMScheduler)
         if not is_ddim and actual_eta != 0.0:
-            print(f"⚠️ 当前使用DDPM调度器，eta参数({actual_eta})将被忽略")
+            if verbose:
+                print(f"⚠️ 当前使用DDPM调度器，eta参数({actual_eta})将被忽略")
             actual_eta = 0.0
         
-        print(f"🔄 开始采样: 调度器={'DDIM' if is_ddim else 'DDPM'}, 步数={num_inference_steps}, eta={actual_eta}, CFG={guidance_scale}")
+        if verbose:
+            print(f"🔄 开始采样: 调度器={'DDIM' if is_ddim else 'DDPM'}, 步数={num_inference_steps}, eta={actual_eta}, CFG={guidance_scale}")
         
         # 获取潜在空间尺寸
         # 假设输入图像为256x256，VAE下采样8倍，得到32x32
@@ -374,7 +378,8 @@ class LatentDiffusionModel(nn.Module):
                 latents = result.prev_sample if hasattr(result, 'prev_sample') else result[0]
                     
             except Exception as e:
-                print(f"⚠️ 采样步骤 {i} 出错: {e}")
+                if verbose:
+                    print(f"⚠️ 采样步骤 {i} 出错: {e}")
                 # 继续采样，但使用前一个latents
                 continue
         
@@ -392,7 +397,8 @@ class LatentDiffusionModel(nn.Module):
                 images = (images + 1.0) / 2.0
             else:
                 # 异常情况：使用min-max归一化
-                print(f"⚠️ VAE输出范围异常: [{raw_min:.3f}, {raw_max:.3f}], 使用自适应归一化")
+                if verbose:
+                    print(f"⚠️ VAE输出范围异常: [{raw_min:.3f}, {raw_max:.3f}], 使用自适应归一化")
                 images = (images - raw_min) / (raw_max - raw_min + 1e-8)
             
             # 最终裁剪到[0,1]
@@ -402,18 +408,19 @@ class LatentDiffusionModel(nn.Module):
             final_min, final_max = images.min().item(), images.max().item()
             final_mean = images.mean().item()
             
-            if final_mean < 0.1 or final_mean > 0.9:
+            if verbose and (final_mean < 0.1 or final_mean > 0.9):
                 print(f"⚠️ 生成图像亮度异常: 均值={final_mean:.3f}")
             
-            # 🔧 简化采样完成日志 - 只在单独采样时详细显示
-            if batch_size <= 4:  # 小批次时显示详细信息
+            # 🔧 简化采样完成日志 - 只在详细模式或小批次时显示
+            if verbose or batch_size <= 4:  # 详细模式或小批次时显示详细信息
                 print(f"✅ 采样完成，生成 {batch_size} 张图像")
                 print(f"   📊 最终图像范围: [{final_min:.3f}, {final_max:.3f}], 均值: {final_mean:.3f}")
             
             return images
             
         except Exception as e:
-            print(f"⚠️ 图像解码失败: {e}")
+            if verbose:
+                print(f"⚠️ 图像解码失败: {e}")
             # 返回一个默认的图像张量
             return torch.zeros(batch_size, 3, 256, 256, device=device)
     
