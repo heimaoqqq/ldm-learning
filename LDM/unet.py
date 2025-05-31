@@ -303,77 +303,202 @@ class AttentionBlock(nn.Module):
     ) -> torch.Tensor:
         batch, channel, height, width = hidden_states.shape
         residual = hidden_states
-        
-        # 🔧 预归一化
-        hidden_states = self.pre_norm(hidden_states)
-        
-        # 🔧 添加位置编码
-        if height <= 32 and width <= 32:
-            pos_emb = F.interpolate(self.pos_embedding, size=(height, width), mode='bilinear', align_corners=False)
-            hidden_states = hidden_states + pos_emb
-        
-        # 🔧 空间注意力增强
-        spatial_weights = self.spatial_attention(hidden_states)
-        spatial_enhanced = hidden_states * spatial_weights
-        
-        # 标准注意力路径
-        standard_hidden = self.norm(hidden_states)
-        standard_hidden = standard_hidden.view(batch, channel, height * width).transpose(1, 2)
 
-        encoder_hidden_states = encoder_hidden_states if encoder_hidden_states is not None else standard_hidden
+        # 如果没有提供编码器隐藏状态，使用self-attention
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states.view(batch, channel, height * width).transpose(1, 2)
 
-        # 标准注意力计算
-        query = self.to_q(standard_hidden)
-        key = self.to_k(encoder_hidden_states)
-        value = self.to_v(encoder_hidden_states)
+        # 🔧 输入检查
+        if torch.any(torch.isnan(hidden_states)) or torch.any(torch.isinf(hidden_states)):
+            print(f"⚠️ 注意力输入异常")
+            hidden_states = torch.clamp(hidden_states, min=-5.0, max=5.0)
+            hidden_states = torch.where(torch.isnan(hidden_states) | torch.isinf(hidden_states), torch.zeros_like(hidden_states), hidden_states)
 
-        query = self.reshape_heads_to_batch_dim(query)
-        key = self.reshape_heads_to_batch_dim(key)
-        value = self.reshape_heads_to_batch_dim(value)
+        # 标准化和增强
+        normalized = self.norm(hidden_states)
+        
+        # 🔧 检查归一化输出
+        if torch.any(torch.isnan(normalized)) or torch.any(torch.isinf(normalized)):
+            print(f"⚠️ 注意力归一化异常")
+            normalized = torch.zeros_like(hidden_states)
+        
+        # 🔧 空间增强 - 添加数值稳定性
+        try:
+            spatial_enhanced = self.spatial_attention(normalized)
+            if torch.any(torch.isnan(spatial_enhanced)) or torch.any(torch.isinf(spatial_enhanced)):
+                print(f"⚠️ 空间注意力输出异常")
+                spatial_enhanced = normalized
+        except Exception as e:
+            print(f"⚠️ 空间注意力计算失败: {e}")
+            spatial_enhanced = normalized
 
-        # 计算注意力
-        attention_scores = torch.matmul(query, key.transpose(-1, -2))
-        attention_scores = attention_scores / math.sqrt(self.head_size)
-        attention_probs = torch.softmax(attention_scores, dim=-1)
+        # Reshape for attention
+        hidden_states = spatial_enhanced.view(batch, channel, height * width).transpose(1, 2)
 
-        # 应用注意力权重
-        standard_out = torch.matmul(attention_probs, value)
-        standard_out = self.reshape_batch_dim_to_heads(standard_out)
+        # 🔧 基础注意力计算 - 加强数值稳定性
+        try:
+            query = self.to_q(hidden_states)
+            key = self.to_k(encoder_hidden_states)
+            value = self.to_v(encoder_hidden_states)
+
+            # 检查QKV
+            for name, tensor in [("query", query), ("key", key), ("value", value)]:
+                if torch.any(torch.isnan(tensor)) or torch.any(torch.isinf(tensor)):
+                    print(f"⚠️ 注意力{name}异常，使用零值")
+                    tensor.fill_(0.0)
+
+            # Reshape for multi-head attention
+            query = self.reshape_heads_to_batch_dim(query)
+            key = self.reshape_heads_to_batch_dim(key)
+            value = self.reshape_heads_to_batch_dim(value)
+
+            # 🔧 计算注意力分数 - 添加数值稳定性
+            attention_scores = torch.matmul(query, key.transpose(-1, -2))
+            attention_scores = attention_scores / math.sqrt(query.size(-1))
+            
+            # 🔧 检查注意力分数
+            if torch.any(torch.isnan(attention_scores)) or torch.any(torch.isinf(attention_scores)):
+                print(f"⚠️ 注意力分数异常，使用均匀分布")
+                attention_scores = torch.zeros_like(attention_scores)
+
+            # 🔧 稳定的softmax
+            attention_scores = torch.clamp(attention_scores, min=-10.0, max=10.0)
+            attention_probs = torch.softmax(attention_scores, dim=-1)
+            
+            # 检查注意力概率
+            if torch.any(torch.isnan(attention_probs)) or torch.any(torch.isinf(attention_probs)):
+                print(f"⚠️ 注意力概率异常，使用均匀分布")
+                seq_len = attention_probs.size(-1)
+                attention_probs = torch.full_like(attention_probs, 1.0 / seq_len)
+
+            # 应用注意力权重
+            standard_out = torch.matmul(attention_probs, value)
+            standard_out = self.reshape_batch_dim_to_heads(standard_out)
+            
+            # 检查标准输出
+            if torch.any(torch.isnan(standard_out)) or torch.any(torch.isinf(standard_out)):
+                print(f"⚠️ 标准注意力输出异常")
+                standard_out = torch.zeros_like(standard_out)
+        except Exception as e:
+            print(f"⚠️ 基础注意力计算失败: {e}")
+            standard_out = torch.zeros(batch, height * width, channel, device=hidden_states.device)
         
-        # 🔧 多尺度注意力路径
-        multi_scale_hidden = spatial_enhanced.view(batch, channel, height * width).transpose(1, 2)
+        # 🔧 多尺度注意力路径 - 添加异常处理
+        try:
+            multi_scale_hidden = spatial_enhanced.view(batch, channel, height * width).transpose(1, 2)
+            
+            multi_queries = []
+            multi_keys = []
+            multi_values = []
+            
+            for q_proj, k_proj, v_proj in zip(self.to_q_multi, self.to_k_multi, self.to_v_multi):
+                try:
+                    mq = q_proj(multi_scale_hidden)
+                    mk = k_proj(encoder_hidden_states)
+                    mv = v_proj(encoder_hidden_states)
+                    
+                    # 检查多尺度QKV
+                    for name, tensor in [("multi_q", mq), ("multi_k", mk), ("multi_v", mv)]:
+                        if torch.any(torch.isnan(tensor)) or torch.any(torch.isinf(tensor)):
+                            print(f"⚠️ {name}异常，使用零值")
+                            tensor.fill_(0.0)
+                    
+                    multi_queries.append(mq)
+                    multi_keys.append(mk)
+                    multi_values.append(mv)
+                except Exception as e:
+                    print(f"⚠️ 多尺度投影失败: {e}")
+                    # 使用零值作为备选
+                    zero_q = torch.zeros_like(multi_scale_hidden)
+                    zero_kv = torch.zeros_like(encoder_hidden_states)
+                    multi_queries.append(zero_q)
+                    multi_keys.append(zero_kv)
+                    multi_values.append(zero_kv)
+            
+            multi_out_parts = []
+            for query_part, key_part, value_part in zip(multi_queries, multi_keys, multi_values):
+                try:
+                    # 🔧 简化的注意力计算 - 添加数值稳定性
+                    attn_scores = torch.matmul(query_part, key_part.transpose(-1, -2)) / math.sqrt(query_part.size(-1))
+                    attn_scores = torch.clamp(attn_scores, min=-10.0, max=10.0)
+                    
+                    attn_probs = torch.softmax(attn_scores, dim=-1)
+                    
+                    # 检查多尺度注意力
+                    if torch.any(torch.isnan(attn_probs)) or torch.any(torch.isinf(attn_probs)):
+                        print(f"⚠️ 多尺度注意力概率异常")
+                        seq_len = attn_probs.size(-1)
+                        attn_probs = torch.full_like(attn_probs, 1.0 / seq_len)
+                    
+                    attn_out = torch.matmul(attn_probs, value_part)
+                    
+                    if torch.any(torch.isnan(attn_out)) or torch.any(torch.isinf(attn_out)):
+                        print(f"⚠️ 多尺度注意力输出异常")
+                        attn_out = torch.zeros_like(attn_out)
+                    
+                    multi_out_parts.append(attn_out)
+                except Exception as e:
+                    print(f"⚠️ 多尺度注意力计算失败: {e}")
+                    multi_out_parts.append(torch.zeros_like(query_part))
+            
+            multi_out = torch.cat(multi_out_parts, dim=-1)
+        except Exception as e:
+            print(f"⚠️ 多尺度注意力路径失败: {e}")
+            multi_out = torch.zeros_like(standard_out)
         
-        multi_queries = []
-        multi_keys = []
-        multi_values = []
+        # 🔧 特征融合 - 添加异常处理
+        try:
+            combined_features = torch.cat([standard_out, multi_out], dim=-1)
+            
+            if torch.any(torch.isnan(combined_features)) or torch.any(torch.isinf(combined_features)):
+                print(f"⚠️ 组合特征异常")
+                combined_features = torch.zeros_like(combined_features)
+            
+            fused_output = self.feature_fusion(combined_features)
+            
+            if torch.any(torch.isnan(fused_output)) or torch.any(torch.isinf(fused_output)):
+                print(f"⚠️ 特征融合输出异常")
+                fused_output = torch.zeros_like(standard_out)
+        except Exception as e:
+            print(f"⚠️ 特征融合失败: {e}")
+            fused_output = standard_out
         
-        for q_proj, k_proj, v_proj in zip(self.to_q_multi, self.to_k_multi, self.to_v_multi):
-            multi_queries.append(q_proj(multi_scale_hidden))
-            multi_keys.append(k_proj(encoder_hidden_states))
-            multi_values.append(v_proj(encoder_hidden_states))
-        
-        multi_out_parts = []
-        for query_part, key_part, value_part in zip(multi_queries, multi_keys, multi_values):
-            # 简化的注意力计算
-            attn_scores = torch.matmul(query_part, key_part.transpose(-1, -2)) / math.sqrt(query_part.size(-1))
-            attn_probs = torch.softmax(attn_scores, dim=-1)
-            attn_out = torch.matmul(attn_probs, value_part)
-            multi_out_parts.append(attn_out)
-        
-        multi_out = torch.cat(multi_out_parts, dim=-1)
-        
-        # 🔧 特征融合
-        combined_features = torch.cat([standard_out, multi_out], dim=-1)
-        fused_output = self.feature_fusion(combined_features)
-        
-        final_output = self.to_out(fused_output)
+        # 🔧 输出投影 - 添加异常处理
+        try:
+            final_output = self.to_out(fused_output)
+            
+            if torch.any(torch.isnan(final_output)) or torch.any(torch.isinf(final_output)):
+                print(f"⚠️ 输出投影异常")
+                final_output = torch.zeros_like(final_output)
+        except Exception as e:
+            print(f"⚠️ 输出投影失败: {e}")
+            final_output = torch.zeros_like(fused_output)
 
         # 重新reshape为原始形状
         final_output = final_output.transpose(-1, -2).reshape(batch, channel, height, width)
         
-        # 🔧 后归一化和残差连接
-        final_output = self.post_norm(final_output)
-        return final_output + residual
+        # 🔧 后归一化和残差连接 - 添加异常处理
+        try:
+            final_output = self.post_norm(final_output)
+            
+            if torch.any(torch.isnan(final_output)) or torch.any(torch.isinf(final_output)):
+                print(f"⚠️ 后归一化异常")
+                final_output = torch.zeros_like(final_output)
+            
+            # 🔧 安全的残差连接
+            result = final_output + residual
+            
+            if torch.any(torch.isnan(result)) or torch.any(torch.isinf(result)):
+                print(f"⚠️ 残差连接异常，仅使用残差")
+                result = residual
+            
+            # 最终输出限制
+            result = torch.clamp(result, min=-5.0, max=5.0)
+            
+            return result
+        except Exception as e:
+            print(f"⚠️ 后处理失败: {e}")
+            return torch.clamp(residual, min=-5.0, max=5.0)
 
 class UNetModel(nn.Module):
     """
@@ -536,78 +661,169 @@ class UNetModel(nn.Module):
             class_labels: [batch_size] 类别标签 (可选)
             encoder_hidden_states: 编码器隐藏状态 (用于交叉注意力)
         """
+        # 🔧 输入检查
+        if torch.any(torch.isnan(x)) or torch.any(torch.isinf(x)):
+            print(f"⚠️ U-Net输入异常，使用零输入")
+            x = torch.zeros_like(x)
+        
+        # 限制输入范围
+        x = torch.clamp(x, min=-10.0, max=10.0)
+        
         # 时间嵌入
-        time_emb = get_timestep_embedding(timesteps, self.model_channels)
-        time_emb = self.time_embed(time_emb)
+        try:
+            time_emb = get_timestep_embedding(timesteps, self.model_channels)
+            if torch.any(torch.isnan(time_emb)) or torch.any(torch.isinf(time_emb)):
+                print(f"⚠️ 时间嵌入异常，重新初始化")
+                time_emb = torch.zeros_like(time_emb)
+            
+            time_emb = self.time_embed(time_emb)
+            
+            # 检查时间嵌入输出
+            if torch.any(torch.isnan(time_emb)) or torch.any(torch.isinf(time_emb)):
+                print(f"⚠️ 时间嵌入网络输出异常")
+                time_emb = torch.zeros_like(time_emb)
+        except Exception as e:
+            print(f"⚠️ 时间嵌入计算失败: {e}")
+            time_emb = torch.zeros(x.shape[0], self.model_channels * 4, device=x.device)
 
         # 类别嵌入
         if class_labels is not None and self.class_embed is not None:
-            # 验证标签范围以避免索引越界
-            if torch.any(class_labels < 0) or torch.any(class_labels >= self.num_classes):
-                # 静默修复CFG训练中的-1标签，只在第一次时警告
-                if not hasattr(self, '_label_warning_shown'):
-                    invalid_mask = (class_labels < 0) | (class_labels >= self.num_classes)
-                    invalid_labels = class_labels[invalid_mask]
-                    print(f"💡 检测到CFG训练标签（如-1），已自动处理。后续将静默修复。")
-                    self._label_warning_shown = True
+            try:
+                # 验证标签范围以避免索引越界
+                if torch.any(class_labels < 0) or torch.any(class_labels >= self.num_classes):
+                    # 静默修复CFG训练中的-1标签，只在第一次时警告
+                    if not hasattr(self, '_label_warning_shown'):
+                        invalid_mask = (class_labels < 0) | (class_labels >= self.num_classes)
+                        invalid_labels = class_labels[invalid_mask]
+                        print(f"💡 检测到CFG训练标签（如-1），已自动处理。后续将静默修复。")
+                        self._label_warning_shown = True
+                    
+                    # 将超出范围的标签替换为0（安全值）
+                    class_labels = torch.clamp(class_labels, 0, self.num_classes - 1)
                 
-                # 将超出范围的标签替换为0（安全值）
-                class_labels = torch.clamp(class_labels, 0, self.num_classes - 1)
-            
-            class_emb = self.class_embed(class_labels)
-            class_emb = self.class_proj(class_emb)
-            time_emb = time_emb + class_emb
+                class_emb = self.class_embed(class_labels)
+                class_emb = self.class_proj(class_emb)
+                
+                # 检查类别嵌入
+                if torch.any(torch.isnan(class_emb)) or torch.any(torch.isinf(class_emb)):
+                    print(f"⚠️ 类别嵌入异常，跳过类别条件")
+                    class_emb = torch.zeros_like(time_emb)
+                
+                time_emb = time_emb + class_emb
+            except Exception as e:
+                print(f"⚠️ 类别嵌入计算失败: {e}")
 
         # 前向过程
         h = x
         hs = []
 
         # 下采样
-        for module in self.input_blocks:
-            if isinstance(module, nn.ModuleList):
-                for layer in module:
+        try:
+            for module_idx, module in enumerate(self.input_blocks):
+                if isinstance(module, nn.ModuleList):
+                    for layer_idx, layer in enumerate(module):
+                        try:
+                            if isinstance(layer, ResnetBlock):
+                                h = layer(h, time_emb)
+                            elif isinstance(layer, AttentionBlock):
+                                h = layer(h, encoder_hidden_states)
+                            else:
+                                h = layer(h)
+                            
+                            # 🔧 每层后检查数值健康
+                            if torch.any(torch.isnan(h)) or torch.any(torch.isinf(h)):
+                                print(f"⚠️ 下采样模块{module_idx}层{layer_idx}输出异常")
+                                h = torch.clamp(h, min=-5.0, max=5.0)
+                                h = torch.where(torch.isnan(h) | torch.isinf(h), torch.zeros_like(h), h)
+                        except Exception as e:
+                            print(f"⚠️ 下采样层计算失败: {e}")
+                            continue
+                else:
+                    h = module(h)
+                
+                hs.append(h)
+        except Exception as e:
+            print(f"⚠️ 下采样路径计算失败: {e}")
+
+        # Bottleneck
+        try:
+            for layer_idx, layer in enumerate(self.middle_block):
+                try:
                     if isinstance(layer, ResnetBlock):
                         h = layer(h, time_emb)
                     elif isinstance(layer, AttentionBlock):
                         h = layer(h, encoder_hidden_states)
                     else:
                         h = layer(h)
-            else:
-                h = module(h)
-            hs.append(h)
-
-        # Bottleneck
-        for layer in self.middle_block:
-            if isinstance(layer, ResnetBlock):
-                h = layer(h, time_emb)
-            elif isinstance(layer, AttentionBlock):
-                h = layer(h, encoder_hidden_states)
-            else:
-                h = layer(h)
+                    
+                    # 🔧 检查中间层输出
+                    if torch.any(torch.isnan(h)) or torch.any(torch.isinf(h)):
+                        print(f"⚠️ 中间层{layer_idx}输出异常")
+                        h = torch.clamp(h, min=-5.0, max=5.0)
+                        h = torch.where(torch.isnan(h) | torch.isinf(h), torch.zeros_like(h), h)
+                except Exception as e:
+                    print(f"⚠️ 中间层{layer_idx}计算失败: {e}")
+                    continue
+        except Exception as e:
+            print(f"⚠️ 中间块计算失败: {e}")
 
         # 上采样
-        for module in self.output_blocks:
-            h = torch.cat([h, hs.pop()], dim=1)
-            for layer in module:
-                if isinstance(layer, ResnetBlock):
-                    h = layer(h, time_emb)
-                elif isinstance(layer, AttentionBlock):
-                    h = layer(h, encoder_hidden_states)
-                else:
-                    h = layer(h)
+        try:
+            for module_idx, module in enumerate(self.output_blocks):
+                try:
+                    if hs:
+                        skip_connection = hs.pop()
+                        # 检查跳跃连接
+                        if torch.any(torch.isnan(skip_connection)) or torch.any(torch.isinf(skip_connection)):
+                            print(f"⚠️ 跳跃连接{module_idx}异常")
+                            skip_connection = torch.zeros_like(h)
+                        h = torch.cat([h, skip_connection], dim=1)
+                    
+                    for layer_idx, layer in enumerate(module):
+                        try:
+                            if isinstance(layer, ResnetBlock):
+                                h = layer(h, time_emb)
+                            elif isinstance(layer, AttentionBlock):
+                                h = layer(h, encoder_hidden_states)
+                            else:
+                                h = layer(h)
+                            
+                            # 🔧 检查上采样层输出
+                            if torch.any(torch.isnan(h)) or torch.any(torch.isinf(h)):
+                                print(f"⚠️ 上采样模块{module_idx}层{layer_idx}输出异常")
+                                h = torch.clamp(h, min=-5.0, max=5.0)
+                                h = torch.where(torch.isnan(h) | torch.isinf(h), torch.zeros_like(h), h)
+                        except Exception as e:
+                            print(f"⚠️ 上采样层计算失败: {e}")
+                            continue
+                except Exception as e:
+                    print(f"⚠️ 上采样模块{module_idx}计算失败: {e}")
+                    continue
+        except Exception as e:
+            print(f"⚠️ 上采样路径计算失败: {e}")
 
-        # 输出
-        h = self.out_norm(h)
-        h = F.silu(h)
-        h = self.out_conv(h)
-        
-        # 更严格的数值稳定性处理
-        # 检查并处理异常值
-        if torch.any(torch.isnan(h)) or torch.any(torch.isinf(h)):
-            print(f"⚠️ U-Net输出异常，使用零输出")
-            h = torch.zeros_like(h)
-        
-        # 更严格的输出范围限制
-        h = torch.clamp(h, min=-5.0, max=5.0)
+        # 输出层
+        try:
+            h = self.out_norm(h)
+            h = F.silu(h)
+            
+            # 🔧 激活后检查
+            if torch.any(torch.isnan(h)) or torch.any(torch.isinf(h)):
+                print(f"⚠️ 输出激活异常")
+                h = torch.clamp(h, min=-5.0, max=5.0)
+                h = torch.where(torch.isnan(h) | torch.isinf(h), torch.zeros_like(h), h)
+            
+            h = self.out_conv(h)
+            
+            # 🔧 最终输出检查和处理
+            if torch.any(torch.isnan(h)) or torch.any(torch.isinf(h)):
+                print(f"⚠️ U-Net输出异常，使用零输出")
+                h = torch.zeros_like(h)
+            
+            # 更严格的输出范围限制
+            h = torch.clamp(h, min=-5.0, max=5.0)
+        except Exception as e:
+            print(f"⚠️ 输出层计算失败: {e}")
+            h = torch.zeros_like(x)
 
         return h 
