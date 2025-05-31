@@ -84,14 +84,14 @@ training:
 fid_evaluation:
   enabled: true  # 🎯 保持FID评估监控质量
   eval_interval: 10  # 🎯 适中的评估频率
-  num_samples: 200  # 🎯 适中的样本数，平衡准确性和内存
+  num_samples: 2048  # 🎯 适中的样本数，平衡准确性和内存
   batch_size: 3  # 🎯 降低到3，配合主训练batch_size
-  max_real_samples: 800  # 🎯 适中的真实样本数
+  max_real_samples: 2048  # 🎯 适中的真实样本数
   save_best_fid_model: true  # 保存最佳FID模型
 
 # 推理配置
 inference:
-  num_inference_steps: 40  # 🎯 适中的推理步数，平衡质量和内存
+  num_inference_steps: 1000  # 🎯 适中的推理步数，平衡质量和内存
   guidance_scale: 7.5  # CFG引导强度
   eta: 0.0  # DDIM参数 (0为确定性采样)
   
