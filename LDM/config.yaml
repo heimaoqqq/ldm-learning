@@ -57,12 +57,12 @@ unet:
 # 训练配置
 training:
   epochs: 500
-  lr: 0.00005  # 🎯 保持较高学习率
+  lr: 0.00002  # 🔧 降低基础学习率，防止梯度累积时数值不稳定
   weight_decay: 0.01
   warmup_steps: 1000  # 🎯 保持预热步数
   
   # 🆕 梯度累积配置
-  gradient_accumulation_steps: 4  # 梯度累积步数，有效batch size = batch_size * accumulation_steps
+  gradient_accumulation_steps: 2  # 🔧 降低累积步数，减少数值不稳定风险
   
   # 保存设置
   save_dir: "ldm_models"
@@ -78,7 +78,7 @@ training:
   cfg_dropout_prob: 0.2  # 🎯 保持强CFG训练
   
   # 梯度裁剪
-  grad_clip_norm: 1.0  # 🎯 保持梯度裁剪
+  grad_clip_norm: 0.5  # 🔧 更严格的梯度裁剪
   
   # 调度器
   use_scheduler: true
@@ -87,7 +87,7 @@ training:
 # FID评估配置
 fid_evaluation:
   enabled: true  # 🎯 保持FID评估监控质量
-  eval_interval: 20  # 🎯 适中的评估频率
+  eval_interval: 5  # 🎯 适中的评估频率
   num_samples: 2048  # 🎯 适中的样本数，平衡准确性和内存
   batch_size: 3  # 🎯 降低到3，配合主训练batch_size
   max_real_samples: 2048  # 🎯 适中的真实样本数
@@ -103,6 +103,24 @@ inference:
   # 采样配置
   sample_batch_size: 3  # 🎯 配合训练batch_size
   num_samples_per_class: 6  # 🎯 适中的样本数量
+  
+  # 🆕 归一化配置
+  normalization:
+    # 数据范围定义
+    data_range: [0, 1]        # 原始图像像素范围
+    vae_input_range: [-1, 1]  # VAE输入范围（经过预处理）
+    vae_output_range: [-1, 1] # VAE输出范围（tanh激活）
+    final_output_range: [0, 1] # 最终输出图像范围
+    
+    # 数值稳定性配置
+    latent_clamp_range: [-5, 5]    # 潜在表示裁剪范围
+    latent_std_threshold: 3.0      # 潜在表示标准差阈值
+    enable_range_checking: true    # 启用范围检查
+    enable_adaptive_norm: true     # 启用自适应归一化
+    
+    # VAE解码安全性
+    vae_decode_clamp: true         # 启用VAE解码输出裁剪
+    vae_decode_range: [-1.1, 1.1] # VAE解码输出安全范围
   
   # 输出设置
   output_dir: "generated_samples"
