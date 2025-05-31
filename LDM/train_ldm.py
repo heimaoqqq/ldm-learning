@@ -127,6 +127,7 @@ def save_sample_images(model, device, config, epoch, save_dir):
                 num_inference_steps=config['inference']['num_inference_steps'],
                 guidance_scale=config['inference']['guidance_scale'],
                 eta=config['inference']['eta'],
+                verbose=True  # 🔧 样本生成时保持详细输出，方便调试
             )
             
             # 反归一化
@@ -560,6 +561,16 @@ def train_ldm():
                     generated_samples = []
                     num_is_samples = min(200, val_dataset_len)  # IS分数样本数
                     
+                    # 🔧 添加IS计算的进度条
+                    is_batches = (num_is_samples + 7) // 8  # 8个样本一批
+                    is_progress = tqdm(
+                        total=is_batches,
+                        desc=f"  IS生成({config['inference']['num_inference_steps']}步)",
+                        unit="batch",
+                        ncols=80,
+                        leave=False
+                    )
+                    
                     for i in range(0, num_is_samples, 8):  # 每次生成8个样本
                         batch_size_is = min(8, num_is_samples - i)
                         # 随机选择类别
@@ -571,11 +582,18 @@ def train_ldm():
                             class_labels=class_labels,
                             num_inference_steps=config['inference']['num_inference_steps'],  # 🆕 使用配置的推理步数
                             guidance_scale=config['inference']['guidance_scale'],
+                            verbose=False  # 🔧 关闭详细输出
                         )
                         
                         # 反归一化到[0,1]
                         generated_batch = denormalize_for_metrics(generated_batch)
                         generated_samples.append(generated_batch)
+                        
+                        # 更新IS进度条
+                        is_progress.update(1)
+                        is_progress.set_postfix({'samples': len(generated_samples) * 8})
+                    
+                    is_progress.close()
                     
                     if generated_samples:
                         all_generated = torch.cat(generated_samples, dim=0)
