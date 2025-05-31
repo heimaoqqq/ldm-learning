@@ -21,10 +21,11 @@ dataset:
 
 # 扩散模型配置
 diffusion:
-  timesteps: 1000  # 扩散步数T
-  noise_schedule: "cosine"  # linear 或 cosine (余弦调度更平滑)
-  beta_start: 0.0001
-  beta_end: 0.02
+  timesteps: 1000  # 训练时总扩散步数
+  noise_schedule: "cosine"  # 🎯 保持余弦调度
+  beta_start: 0.00085  # 🎯 较小起始值
+  beta_end: 0.012  # 🎯 较小终止值
+  scheduler_type: "ddim"  # 🆕 使用DDIM调度器 (ddpm/ddim)
   clip_denoised: true
 
 # U-Net 网络结构配置
@@ -60,6 +61,9 @@ training:
   weight_decay: 0.01
   warmup_steps: 1000  # 🎯 保持预热步数
   
+  # 🆕 梯度累积配置
+  gradient_accumulation_steps: 4  # 梯度累积步数，有效batch size = batch_size * accumulation_steps
+  
   # 保存设置
   save_dir: "ldm_models"
   save_interval: 50  # 每隔多少epoch保存一次
@@ -83,7 +87,7 @@ training:
 # FID评估配置
 fid_evaluation:
   enabled: true  # 🎯 保持FID评估监控质量
-  eval_interval: 10  # 🎯 适中的评估频率
+  eval_interval: 20  # 🎯 适中的评估频率
   num_samples: 2048  # 🎯 适中的样本数，平衡准确性和内存
   batch_size: 3  # 🎯 降低到3，配合主训练batch_size
   max_real_samples: 2048  # 🎯 适中的真实样本数
@@ -91,9 +95,10 @@ fid_evaluation:
 
 # 推理配置
 inference:
-  num_inference_steps: 1000  # 🎯 适中的推理步数，平衡质量和内存
+  num_inference_steps: 50  # 🆕 降低推理步数以提高速度
   guidance_scale: 7.5  # CFG引导强度
-  eta: 0.0  # DDIM参数 (0为确定性采样)
+  eta: 0.3  # 🆕 使用中等eta值，平衡质量和多样性 (0=确定性, 1=随机)
+  adaptive_eta: true  # 🆕 启用改进的自适应eta
   
   # 采样配置
   sample_batch_size: 3  # 🎯 配合训练batch_size
