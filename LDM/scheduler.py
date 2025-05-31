@@ -26,12 +26,7 @@ class DDPMScheduler:
         self.clip_denoised = clip_denoised
         
         # 根据调度类型生成beta序列
-        if beta_schedule == "linear":
-            self.betas = torch.linspace(beta_start, beta_end, num_train_timesteps, dtype=torch.float32)
-        elif beta_schedule == "cosine":
-            self.betas = self._cosine_beta_schedule(num_train_timesteps)
-        else:
-            raise ValueError(f"Unsupported beta schedule: {beta_schedule}")
+        self.betas = self._get_beta_schedule(beta_schedule, beta_start, beta_end, num_train_timesteps)
         
         # 计算alpha相关参数
         self.alphas = 1.0 - self.betas
@@ -59,6 +54,18 @@ class DDPMScheduler:
             (1.0 - self.alphas_cumprod_prev) * torch.sqrt(self.alphas) / (1.0 - self.alphas_cumprod)
         )
         
+    def _get_beta_schedule(self, beta_schedule: str, beta_start: float, beta_end: float, num_timesteps: int):
+        """获取噪声调度"""
+        if beta_schedule == "linear":
+            return torch.linspace(beta_start, beta_end, num_timesteps, dtype=torch.float32)
+        elif beta_schedule == "scaled_linear":
+            # Stable Diffusion使用的调度方式
+            return torch.linspace(beta_start**0.5, beta_end**0.5, num_timesteps, dtype=torch.float32) ** 2
+        elif beta_schedule == "cosine":
+            return self._cosine_beta_schedule(num_timesteps)
+        else:
+            raise ValueError(f"Unsupported beta schedule: {beta_schedule}")
+    
     def _cosine_beta_schedule(self, timesteps: int, s: float = 0.008) -> torch.Tensor:
         """
         余弦噪声调度，来自 "Improved Denoising Diffusion Probabilistic Models"
