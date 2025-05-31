@@ -1,699 +1,466 @@
-import os
-import yaml
+#!/usr/bin/env python3
+"""
+潜在扩散模型 (Latent Diffusion Model) 主要实现
+"""
+
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
+import torch.nn.functional as F
 import sys
-import time
+import os
 import math
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-import torchvision.utils as vutils
-from typing import Dict, Any
-import json
+from typing import Dict, Tuple, Optional, Any
 
-# 添加模块路径
+# 添加VAE模块路径
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
 
-from ldm import LatentDiffusionModel
-# 从VAE目录导入dataset功能
-from dataset import build_dataloader
-from fid_evaluation import FIDEvaluator
-from metrics import DiffusionMetrics, denormalize_for_metrics
+from adv_vq_vae import AdvVQVAE
+from unet import UNetModel  # 使用修复后的原始U-Net
+from scheduler import DDPMScheduler, DDIMScheduler  # 🆕 导入DDIM调度器
 
-def check_tensor_health(tensor, name="tensor"):
-    """检查张量的数值健康状况"""
-    if torch.any(torch.isnan(tensor)):
-        print(f"❌ {name} 包含 NaN 值")
-        return False
-    if torch.any(torch.isinf(tensor)):
-        print(f"❌ {name} 包含 Inf 值")
-        return False
-    if tensor.abs().max() > 1000:
-        print(f"⚠️ {name} 包含极大值: max={tensor.abs().max().item():.2f}")
-        return False
-    return True
-
-def safe_mse_loss(pred, target, name="loss"):
-    """安全的MSE损失计算，防止NaN/Inf"""
-    # 检查输入
-    if not check_tensor_health(pred, f"{name}_pred"):
-        pred = torch.clamp(pred, -10, 10)
-    if not check_tensor_health(target, f"{name}_target"):
-        target = torch.clamp(target, -10, 10)
-    
-    # 计算损失
-    loss = torch.nn.functional.mse_loss(pred, target)
-    
-    # 检查损失值
-    if torch.isnan(loss) or torch.isinf(loss):
-        print(f"⚠️ {name} 计算出现异常，使用安全值")
-        loss = torch.tensor(1.0, device=pred.device, requires_grad=True)
-    
-    # 限制损失范围
-    loss = torch.clamp(loss, 0.0, 100.0)
-    return loss
-
-def get_cosine_schedule_with_warmup(
-    optimizer: torch.optim.Optimizer,
-    num_warmup_steps: int,
-    num_training_steps: int,
-    num_cycles: float = 0.5,
-    last_epoch: int = -1,
-):
+class LatentDiffusionModel(nn.Module):
     """
-    创建带预热的余弦学习率调度器
+    潜在扩散模型
     """
-    def lr_lambda(current_step):
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)))
-
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
-
-def get_cosine_schedule_with_restarts(
-    optimizer: torch.optim.Optimizer,
-    num_warmup_steps: int,
-    num_training_steps: int,
-    num_cycles: int = 3,  # 🔧 重启次数
-    restart_decay: float = 0.8,  # 🔧 每次重启的学习率衰减
-    last_epoch: int = -1,
-):
-    """
-    🔧 创建带重启的余弦学习率调度器 - 更强的学习能力
-    """
-    def lr_lambda(current_step):
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__()
         
-        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        self.config = config
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # 计算当前在第几个周期
-        cycle_length = 1.0 / num_cycles
-        current_cycle = int(progress / cycle_length)
-        cycle_progress = (progress % cycle_length) / cycle_length
+        # 初始化VAE (预训练，冻结参数)
+        self.vae = self._init_vae(config['vae'])
         
-        # 每次重启时降低基础学习率
-        base_lr = restart_decay ** current_cycle
+        # 初始化扩散调度器 - 🆕 支持DDIM和改进eta
+        scheduler_config = config['diffusion']
+        scheduler_type = scheduler_config.get('scheduler_type', 'ddpm').lower()
         
-        # 余弦衰减
-        cosine_factor = 0.5 * (1.0 + math.cos(math.pi * cycle_progress))
-        
-        return max(0.0, base_lr * cosine_factor)
-
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
-
-def denormalize(x):
-    """反归一化图像，从[-1,1]转换到[0,1]"""
-    return (x * 0.5 + 0.5).clamp(0, 1)
-
-def save_sample_images(model, device, config, epoch, save_dir):
-    """生成并保存样本图像"""
-    model.eval()
-    with torch.no_grad():
-        # 为每个类别生成样本
-        num_classes = config['unet']['num_classes']
-        num_samples_per_class = min(4, config['inference']['num_samples_per_class'])
-        
-        all_images = []
-        for class_id in range(min(8, num_classes)):  # 最多显示8个类别
-            class_labels = torch.tensor([class_id] * num_samples_per_class, device=device)
+        if scheduler_type == 'ddim':
+            # 🔧 从推理配置获取eta参数，确保一致性
+            inference_config = config.get('inference', {})
+            default_eta = inference_config.get('eta', 0.0)
+            adaptive_eta = inference_config.get('adaptive_eta', False)
             
-            generated_images = model.sample(
-                batch_size=num_samples_per_class,
-                class_labels=class_labels,
-                num_inference_steps=config['inference']['num_inference_steps'],
-                guidance_scale=config['inference']['guidance_scale'],
-                eta=config['inference']['eta'],
+            self.scheduler = DDIMScheduler(
+                num_train_timesteps=scheduler_config['timesteps'],
+                beta_start=scheduler_config['beta_start'],
+                beta_end=scheduler_config['beta_end'],
+                beta_schedule=scheduler_config['noise_schedule'],
+                eta=default_eta,
+                adaptive_eta=adaptive_eta
             )
-            
-            # 反归一化
-            generated_images = denormalize(generated_images)
-            all_images.append(generated_images)
-        
-        # 拼接所有图像
-        if all_images:
-            all_images = torch.cat(all_images, dim=0)
-            
-            # 保存图像网格
-            grid = vutils.make_grid(all_images, nrow=num_samples_per_class, normalize=False, padding=2)
-            save_path = os.path.join(save_dir, f"samples_epoch_{epoch:04d}.png")
-            vutils.save_image(grid, save_path)
-            print(f"样本图像已保存: {save_path}")
-
-def save_model_checkpoint(model, save_path, epoch=None, extra_info=None):
-    """保存模型检查点的统一函数"""
-    os.makedirs(save_path, exist_ok=True)
-    
-    # 保存模型权重
-    model_path = os.path.join(save_path, 'model.pth')
-    torch.save(model.state_dict(), model_path)
-    
-    # 保存模型配置和额外信息
-    checkpoint_info = {
-        'model_type': 'LatentDiffusionModel',
-        'epoch': epoch,
-        'model_path': model_path,
-        'timestamp': time.time()
-    }
-    
-    if extra_info:
-        checkpoint_info.update(extra_info)
-    
-    info_path = os.path.join(save_path, 'checkpoint_info.json')
-    with open(info_path, 'w') as f:
-        json.dump(checkpoint_info, f, indent=2)
-    
-    return model_path
-
-def train_ldm():
-    """LDM训练主函数"""
-    
-    # 加载配置
-    with open('config.yaml', 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    
-    # 设备配置
-    if config['device'] == 'auto':
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    else:
-        device = torch.device(config['device'])
-    print(f"使用设备: {device}")
-    
-    # 🆕 梯度累积配置
-    accumulation_steps = config['training'].get('gradient_accumulation_steps', 4)  # 默认累积4步
-    effective_batch_size = config['dataset']['batch_size'] * accumulation_steps
-    print(f"🔧 梯度累积配置: 累积步数={accumulation_steps}, 有效batch size={effective_batch_size}")
-    
-    # 创建保存目录
-    save_dir = config['training']['save_dir']
-    os.makedirs(save_dir, exist_ok=True)
-    
-    sample_dir = os.path.join(save_dir, "samples")
-    os.makedirs(sample_dir, exist_ok=True)
-    
-    log_dir = os.path.join(save_dir, "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    
-    # 构建数据加载器
-    print("加载数据集...")
-    train_loader, val_loader, train_dataset_len, val_dataset_len = build_dataloader(
-        config['dataset']['root_dir'],
-        batch_size=config['dataset']['batch_size'],
-        num_workers=config['dataset']['num_workers'],
-        shuffle_train=True,
-        shuffle_val=False,
-        val_split=config['dataset']['val_split']
-    )
-    
-    print(f"数据集加载完成: 训练集 {train_dataset_len}, 验证集 {val_dataset_len}")
-    
-    # 初始化LDM模型
-    print("初始化LDM模型...")
-    
-    # 处理VAE路径
-    vae_path = config['vae']['model_path']
-    if vae_path.startswith('../'):
-        vae_path = os.path.join(os.path.dirname(__file__), vae_path)
-    
-    # 检查VAE文件是否存在
-    if not os.path.exists(vae_path):
-        print(f"❌ 错误: VAE权重文件不存在: {vae_path}")
-        print(f"💡 请先训练VAE模型，运行以下命令:")
-        print(f"   cd VAE")
-        print(f"   python train_adv_vqvae.py")
-        print(f"训练完成后，VAE模型将保存为 vae_models/adv_vqvae_best_fid.pth")
-        print(f"然后再运行LDM训练")
-        return
-    
-    print(f"✓ 发现VAE权重文件: {vae_path}")
-    
-    # 🔧 更新VAE配置中的模型路径
-    config['vae']['model_path'] = vae_path
-    
-    model = LatentDiffusionModel(config).to(device)
-    
-    # 检查模型权重健康状况
-    print("🔍 检查模型权重...")
-    total_params = 0
-    healthy_params = 0
-    for name, param in model.unet.named_parameters():
-        total_params += param.numel()
-        if torch.any(torch.isnan(param)) or torch.any(torch.isinf(param)):
-            print(f"⚠️ 参数 {name} 包含异常值")
-            # 重新初始化异常参数
-            nn.init.xavier_uniform_(param)
+            print(f"✅ 使用DDIM调度器，默认eta={default_eta}, 自适应eta={adaptive_eta}")
         else:
-            healthy_params += param.numel()
-    
-    print(f"✅ 模型权重检查完成: {healthy_params}/{total_params} 参数正常")
-    
-    # 初始化扩散指标计算器
-    print("初始化扩散指标计算器...")
-    diffusion_metrics = DiffusionMetrics(device=device)
-    
-    # 只有启用FID评估时才初始化
-    fid_evaluator = None
-    if config['fid_evaluation']['enabled']:
-        print("初始化FID评估器...")
-        fid_evaluator = FIDEvaluator(device=device)
-        # 计算真实数据特征
-        print("计算真实数据特征用于FID评估...")
-        fid_evaluator.compute_real_features(val_loader, max_samples=1000)
-    
-    # 确保数值类型正确
-    learning_rate = float(config['training']['lr'])
-    weight_decay = float(config['training']['weight_decay'])
-    
-    # 🆕 调整学习率以适应梯度累积
-    effective_lr = learning_rate * accumulation_steps
-    print(f"📊 训练参数: 基础LR={learning_rate:.6f}, 有效LR={effective_lr:.6f}, 梯度裁剪={config['training']['grad_clip_norm']}")
-    
-    # 优化器 - 使用调整后的学习率
-    optimizer = optim.AdamW(
-        model.unet.parameters(),  # 只优化U-Net参数
-        lr=effective_lr,  # 🆕 使用有效学习率
-        weight_decay=weight_decay,
-        eps=1e-8,  # 增加数值稳定性
-    )
-    
-    # 学习率调度器
-    if config['training']['use_scheduler']:
-        # 🆕 调整总步数以适应梯度累积
-        total_steps = (len(train_loader) // accumulation_steps) * config['training']['epochs']
-        
-        # 🔧 根据配置选择调度器类型
-        scheduler_type = config['training'].get('scheduler_type', 'cosine')
-        
-        if scheduler_type == "cosine_with_restarts":
-            print(f"📈 使用带重启的余弦学习率调度器")
-            scheduler = get_cosine_schedule_with_restarts(
-                optimizer,
-                num_warmup_steps=config['training']['warmup_steps'] // accumulation_steps,  # 🆕 调整预热步数
-                num_training_steps=total_steps,
-                num_cycles=3,  # 3次重启周期
-                restart_decay=0.8,  # 每次重启衰减到80%
+            # 标准DDPM调度器
+            self.scheduler = DDPMScheduler(
+                num_train_timesteps=scheduler_config['timesteps'],
+                beta_start=scheduler_config['beta_start'],
+                beta_end=scheduler_config['beta_end'],
+                beta_schedule=scheduler_config['noise_schedule']
             )
-        else:
-            print(f"📈 使用标准余弦学习率调度器")
-            scheduler = get_cosine_schedule_with_warmup(
-                optimizer,
-                num_warmup_steps=config['training']['warmup_steps'] // accumulation_steps,  # 🆕 调整预热步数
-                num_training_steps=total_steps,
-            )
-    else:
-        scheduler = None
-    
-    # 训练状态和日志
-    start_epoch = 0
-    best_loss = float('inf')
-    best_fid = float('inf')
-    global_step = 0
-    
-    # 训练日志
-    training_log = {
-        'epochs': [],
-        'train_loss': [],
-        'val_loss': [],
-        'fid_scores': [],
-        'inception_scores': [],
-        'noise_metrics': [],
-        'learning_rates': []
-    }
-    
-    # 训练循环
-    print(f"开始训练，共 {config['training']['epochs']} 个epoch...")
-    
-    for epoch in range(start_epoch, config['training']['epochs']):
-        model.train()
-        epoch_loss = 0.0
-        epoch_start_time = time.time()
-        valid_batches = 0  # 跟踪有效批次数
+            print(f"✅ 使用DDPM调度器")
         
-        # 🆕 梯度累积相关变量
-        accumulated_loss = 0.0
-        accumulation_count = 0
+        # 初始化U-Net
+        self.unet = UNetModel(**config['unet'])
         
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['training']['epochs']}")
+        # 其他配置
+        self.use_cfg = config['training'].get('use_cfg', False)
+        self.cfg_dropout_prob = config['training'].get('cfg_dropout_prob', 0.1)
         
-        for batch_idx, (images, labels) in enumerate(progress_bar):
+    def _init_vae(self, vae_config: Dict[str, Any]) -> AdvVQVAE:
+        """初始化VAE并加载预训练权重"""
+        vae = AdvVQVAE(
+            in_channels=vae_config['in_channels'],
+            latent_dim=vae_config['latent_dim'],
+            num_embeddings=vae_config['num_embeddings'],
+            beta=vae_config['beta'],
+            decay=vae_config['vq_ema_decay'],
+            groups=vae_config['groups']
+        )
+        
+        # 加载预训练权重
+        if 'model_path' in vae_config and vae_config['model_path']:
             try:
-                images = images.to(device)
-                labels = labels.to(device)
-                
-                # 检查输入数据健康状况
-                if not check_tensor_health(images, "input_images"):
-                    print(f"跳过批次 {batch_idx}：输入图像异常")
-                    continue
-                
-                # 前向传播
-                outputs = model(images, class_labels=labels)
-                loss = outputs['total_loss']  # 使用新的损失键名
-                
-                # 🆕 调整损失以适应梯度累积
-                loss = loss / accumulation_steps
-                
-                # 检查损失
-                if torch.isnan(loss) or torch.isinf(loss):
-                    print(f"❌ 批次 {batch_idx} 损失异常: {loss.item()}")
-                    # 尝试使用噪声损失作为备选
-                    if 'noise_loss' in outputs:
-                        loss = outputs['noise_loss'] / accumulation_steps
-                        print(f"  使用噪声损失: {loss.item():.4f}")
-                    else:
-                        print(f"跳过批次 {batch_idx}")
-                        continue
-                
-                # 限制损失值
-                if loss.item() > 100:
-                    print(f"⚠️ 损失过大 ({loss.item():.2f})，限制为100")
-                    loss = torch.clamp(loss, max=100.0)
-                
-                # 反向传播 - 🆕 累积梯度
-                loss.backward()
-                
-                # 🆕 累积损失和计数
-                accumulated_loss += loss.item()
-                accumulation_count += 1
-                
-                # 🆕 只在累积足够步数后进行优化器更新
-                if accumulation_count >= accumulation_steps or batch_idx == len(train_loader) - 1:
-                    # 检查梯度健康
-                    total_norm = 0
-                    gradient_healthy = True
-                    for p in model.unet.parameters():
-                        if p.grad is not None:
-                            param_norm = p.grad.data.norm(2)
-                            if torch.isnan(param_norm) or torch.isinf(param_norm):
-                                print(f"⚠️ 检测到异常梯度，跳过更新")
-                                gradient_healthy = False
-                                break
-                            total_norm += param_norm.item() ** 2
-                    
-                    if gradient_healthy:
-                        total_norm = total_norm ** (1. / 2)
-                        
-                        # 梯度裁剪
-                        if config['training']['grad_clip_norm'] > 0:
-                            torch.nn.utils.clip_grad_norm_(model.unet.parameters(), config['training']['grad_clip_norm'])
-                        
-                        # 🆕 执行优化器步骤
-                        optimizer.step()
-                        optimizer.zero_grad()  # 清零梯度
-                        
-                        # 更新学习率
-                        if scheduler is not None:
-                            scheduler.step()
-                        
-                        # 🆕 记录累积损失
-                        avg_accumulated_loss = accumulated_loss
-                        epoch_loss += avg_accumulated_loss
-                        valid_batches += 1
-                        global_step += 1
-                        
-                        # 重置累积变量
-                        accumulated_loss = 0.0
-                        accumulation_count = 0
-                        
-                        # 更新进度条
-                        current_lr = optimizer.param_groups[0]['lr']
-                        progress_bar.set_postfix({
-                            'loss': f'{avg_accumulated_loss:.4f}',
-                            'lr': f'{current_lr:.2e}',
-                            'grad_norm': f'{total_norm:.2f}',
-                            'acc_step': f'{accumulation_count}/{accumulation_steps}'
-                        })
-                    else:
-                        # 梯度异常时清零梯度
-                        optimizer.zero_grad()
-                        accumulated_loss = 0.0
-                        accumulation_count = 0
-                else:
-                    # 🆕 未达到累积步数时，更新进度条但不执行优化
-                    current_lr = optimizer.param_groups[0]['lr']
-                    progress_bar.set_postfix({
-                        'acc_loss': f'{accumulated_loss:.4f}',
-                        'lr': f'{current_lr:.2e}',
-                        'acc_step': f'{accumulation_count}/{accumulation_steps}'
-                    })
-            
+                print(f"🔄 加载VAE预训练模型: {vae_config['model_path']}")
+                state_dict = torch.load(vae_config['model_path'], map_location='cpu')
+                vae.load_state_dict(state_dict)
+                print("✅ VAE模型加载成功")
             except Exception as e:
-                print(f"❌ 批次 {batch_idx} 出错: {e}")
-                # 🆕 出错时也要清零累积的梯度
-                if accumulation_count > 0:
-                    optimizer.zero_grad()
-                    accumulated_loss = 0.0
-                    accumulation_count = 0
+                print(f"⚠️ VAE模型加载失败: {e}")
+        
+        # 冻结VAE参数
+        if vae_config.get('freeze', True):
+            for param in vae.parameters():
+                param.requires_grad = False
+            vae.eval()
+            print("❄️ VAE参数已冻结")
+        
+        return vae
+    
+    def encode_to_latent(self, images: torch.Tensor) -> torch.Tensor:
+        """将图像编码到潜在空间"""
+        with torch.no_grad():
+            # 🔧 输入预处理和检查
+            # 确保输入在[0,1]范围内
+            images = torch.clamp(images, 0.0, 1.0)
+            
+            # 转换到VAE期望的[-1,1]范围
+            images = images * 2.0 - 1.0
+            
+            # 检查转换后的数值
+            if torch.any(torch.isnan(images)) or torch.any(torch.isinf(images)):
+                print(f"⚠️ VAE输入预处理异常")
+                images = torch.clamp(images, -1.0, 1.0)
+            
+            try:
+                # VAE编码
+                encoded = self.vae.encoder(images)
+                
+                # 检查编码器输出
+                if torch.any(torch.isnan(encoded)) or torch.any(torch.isinf(encoded)):
+                    print(f"⚠️ VAE编码器输出异常")
+                    encoded = torch.randn_like(encoded) * 0.1
+                
+                # 限制编码器输出范围
+                encoded = torch.clamp(encoded, -5.0, 5.0)
+                
+                # VQ量化
+                quantized, _, _ = self.vae.vq(encoded)
+                
+                # 检查量化输出
+                if torch.any(torch.isnan(quantized)) or torch.any(torch.isinf(quantized)):
+                    print(f"⚠️ VQ量化输出异常")
+                    quantized = torch.randn_like(quantized) * 0.1
+                
+                # 最终范围限制
+                quantized = torch.clamp(quantized, -3.0, 3.0)
+                
+                return quantized
+                
+            except Exception as e:
+                print(f"⚠️ VAE编码过程失败: {e}")
+                # 返回安全的随机潜在表示
+                latent_shape = (images.shape[0], 256, images.shape[2]//8, images.shape[3]//8)
+                return torch.randn(latent_shape, device=images.device) * 0.1
+    
+    def decode_from_latent(self, latents: torch.Tensor) -> torch.Tensor:
+        """从潜在空间解码到图像"""
+        with torch.no_grad():
+            # 🔧 添加潜在表示范围检查和裁剪
+            # 监控输入范围
+            input_min, input_max = latents.min().item(), latents.max().item()
+            input_std = latents.std().item()
+            
+            # 如果范围超出合理范围，进行裁剪
+            if abs(input_min) > 10 or abs(input_max) > 10:
+                print(f"⚠️ 潜在表示范围异常: [{input_min:.3f}, {input_max:.3f}], 进行裁剪")
+                latents = torch.clamp(latents, min=-5.0, max=5.0)
+            
+            # 如果标准差过大，进行缩放
+            if input_std > 3.0:
+                print(f"⚠️ 潜在表示标准差过大: {input_std:.3f}, 进行缩放")
+                latents = latents / (input_std / 2.0)  # 缩放到合理范围
+            
+            # VAE解码
+            decoded = self.vae.decoder(latents)
+            
+            # 🔧 检查解码输出范围
+            output_min, output_max = decoded.min().item(), decoded.max().item()
+            if output_min < -1.1 or output_max > 1.1:
+                print(f"⚠️ VAE解码输出超出tanh范围: [{output_min:.3f}, {output_max:.3f}]")
+                decoded = torch.clamp(decoded, min=-1.0, max=1.0)
+            
+            return decoded
+    
+    def forward(self, images: torch.Tensor, class_labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """
+        前向传播
+        
+        Args:
+            images: [B, 3, H, W] 输入图像
+            class_labels: [B] 类别标签
+            
+        Returns:
+            包含损失信息的字典
+        """
+        batch_size = images.shape[0]
+        
+        # 🔧 输入数值检查和限制
+        if torch.any(torch.isnan(images)) or torch.any(torch.isinf(images)):
+            print(f"⚠️ 输入图像包含异常值，进行修复")
+            images = torch.where(torch.isnan(images) | torch.isinf(images), torch.zeros_like(images), images)
+        
+        # 限制输入范围
+        images = torch.clamp(images, 0.0, 1.0)
+        
+        # 编码到潜在空间
+        latents = self.encode_to_latent(images)  # [B, C, H', W']
+        
+        # 🔧 检查潜在表示的数值健康
+        if torch.any(torch.isnan(latents)) or torch.any(torch.isinf(latents)):
+            print(f"⚠️ VAE编码输出异常，使用安全值")
+            latents = torch.randn_like(latents) * 0.1  # 小的随机噪声
+        
+        # 限制潜在表示范围
+        latents = torch.clamp(latents, -3.0, 3.0)
+        
+        # 采样时间步
+        timesteps = torch.randint(
+            0, self.scheduler.num_train_timesteps, 
+            (batch_size,), device=images.device
+        )
+        
+        # 添加噪声
+        noise = torch.randn_like(latents)
+        
+        # 🔧 限制噪声范围，防止极值
+        noise = torch.clamp(noise, -2.0, 2.0)
+        
+        noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
+        
+        # 🔧 检查加噪后的数值
+        if torch.any(torch.isnan(noisy_latents)) or torch.any(torch.isinf(noisy_latents)):
+            print(f"⚠️ 加噪过程出现异常")
+            noisy_latents = latents + noise * 0.1  # 使用小的噪声比例
+        
+        # CFG训练 (随机丢弃类别标签)
+        if self.use_cfg and class_labels is not None:
+            # 随机mask掉一些类别标签用于CFG训练
+            cfg_mask = torch.rand(batch_size, device=images.device) < self.cfg_dropout_prob
+            class_labels = class_labels.clone()
+            class_labels[cfg_mask] = -1  # 使用-1表示无条件
+        
+        # U-Net预测噪声
+        predicted_noise = self.unet(noisy_latents, timesteps, class_labels)
+        
+        # 🔧 检查预测输出
+        if torch.any(torch.isnan(predicted_noise)) or torch.any(torch.isinf(predicted_noise)):
+            print(f"⚠️ U-Net预测输出异常")
+            predicted_noise = torch.zeros_like(noise)
+        
+        # 限制预测噪声范围
+        predicted_noise = torch.clamp(predicted_noise, -3.0, 3.0)
+        
+        # 计算损失 - 使用更稳定的损失函数
+        try:
+            noise_loss = F.mse_loss(predicted_noise, noise, reduction='mean')
+            
+            # 检查损失值
+            if torch.isnan(noise_loss) or torch.isinf(noise_loss) or noise_loss > 100:
+                print(f"⚠️ 损失值异常: {noise_loss.item():.4f}，使用安全值")
+                noise_loss = torch.tensor(1.0, device=images.device, requires_grad=True)
+            
+        except Exception as e:
+            print(f"⚠️ 损失计算失败: {e}")
+            noise_loss = torch.tensor(1.0, device=images.device, requires_grad=True)
+        
+        return {
+            'noise_loss': noise_loss,
+            'total_loss': noise_loss,
+            'predicted_noise': predicted_noise.detach(),  # 避免梯度传播问题
+            'target_noise': noise.detach()
+        }
+    
+    @torch.no_grad()
+    def sample(
+        self, 
+        batch_size: int, 
+        class_labels: Optional[torch.Tensor] = None,
+        num_inference_steps: int = 50,
+        guidance_scale: float = 7.5,
+        eta: Optional[float] = None  # 🔧 改为可选参数，默认使用调度器配置
+    ) -> torch.Tensor:
+        """
+        DDIM/DDPM采样生成图像
+        
+        Args:
+            batch_size: 批次大小
+            class_labels: [batch_size] 类别标签
+            num_inference_steps: 推理步数
+            guidance_scale: CFG引导强度
+            eta: DDIM参数 (None=使用调度器默认值, 0=确定性采样)
+            
+        Returns:
+            生成的图像 [batch_size, 3, H, W]
+        """
+        device = self.device
+        
+        # 🔧 确定实际使用的eta值
+        if eta is None:
+            # 使用调度器的默认eta（如果是DDIM）
+            actual_eta = getattr(self.scheduler, 'eta', 0.0)
+        else:
+            actual_eta = eta
+        
+        # 🔧 检查调度器类型和eta兼容性
+        is_ddim = isinstance(self.scheduler, DDIMScheduler)
+        if not is_ddim and actual_eta != 0.0:
+            print(f"⚠️ 当前使用DDPM调度器，eta参数({actual_eta})将被忽略")
+            actual_eta = 0.0
+        
+        print(f"🔄 开始采样: 调度器={'DDIM' if is_ddim else 'DDPM'}, 步数={num_inference_steps}, eta={actual_eta}, CFG={guidance_scale}")
+        
+        # 获取潜在空间尺寸
+        # 假设输入图像为256x256，VAE下采样8倍，得到32x32
+        latent_height = 32
+        latent_width = 32
+        latent_channels = self.config['unet']['in_channels']
+        
+        # 初始化随机噪声
+        latents = torch.randn(
+            batch_size, latent_channels, latent_height, latent_width,
+            device=device
+        )
+        
+        # 设置推理调度器
+        self.scheduler.set_timesteps(num_inference_steps, device=device)
+        
+        for i, t in enumerate(self.scheduler.timesteps):
+            # 扩展时间步
+            t_batch = t.unsqueeze(0).repeat(batch_size).to(device)
+            
+            if self.use_cfg and class_labels is not None and guidance_scale > 1.0:
+                # CFG: 同时预测有条件和无条件噪声
+                latent_model_input = torch.cat([latents] * 2)
+                t_input = torch.cat([t_batch] * 2)
+                
+                # 创建条件标签 (有条件 + 无条件)
+                class_input = torch.cat([
+                    class_labels,
+                    torch.full_like(class_labels, -1)  # 无条件标签
+                ])
+                
+                # U-Net预测
+                noise_pred = self.unet(latent_model_input, t_input, class_input)
+                
+                # 分离有条件和无条件预测
+                noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
+                
+                # CFG引导
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+            else:
+                # 无CFG的标准预测
+                noise_pred = self.unet(latents, t_batch, class_labels)
+            
+            # 🔧 统一的调度器步骤调用
+            try:
+                if is_ddim:
+                    # DDIM调度器 - 传递eta参数
+                    result = self.scheduler.step(
+                        model_output=noise_pred, 
+                        timestep=t, 
+                        sample=latents, 
+                        eta=actual_eta
+                    )
+                else:
+                    # DDPM调度器 - 传递eta以保持兼容性（但会被忽略）
+                    result = self.scheduler.step(
+                        model_output=noise_pred, 
+                        timestep=t, 
+                        sample=latents,
+                        eta=actual_eta  # DDPM会忽略这个参数
+                    )
+                
+                latents = result.prev_sample if hasattr(result, 'prev_sample') else result[0]
+                
+                # 🔧 定期打印进度
+                if i % (len(self.scheduler.timesteps) // 4) == 0:
+                    print(f"  📊 采样进度: {i+1}/{len(self.scheduler.timesteps)}")
+                    
+            except Exception as e:
+                print(f"⚠️ 采样步骤 {i} 出错: {e}")
+                # 继续采样，但使用前一个latents
                 continue
         
-        # 🆕 确保epoch结束时清理任何剩余的梯度
-        if accumulation_count > 0:
-            optimizer.zero_grad()
+        # 解码到图像空间
+        try:
+            images = self.decode_from_latent(latents)
         
-        # 计算平均损失
-        if valid_batches > 0:
-            avg_epoch_loss = epoch_loss / valid_batches
-        else:
-            print("❌ 没有有效的训练批次！")
-            avg_epoch_loss = float('inf')
-        
-        epoch_time = time.time() - epoch_start_time
-        current_lr = optimizer.param_groups[0]['lr']
-        
-        print(f"\nEpoch {epoch+1}/{config['training']['epochs']} - Loss: {avg_epoch_loss:.4f} - Valid Batches: {valid_batches}/{len(train_loader)//accumulation_steps} - Time: {epoch_time:.1f}s - LR: {current_lr:.2e}")
-        
-        # 验证
-        avg_val_loss = None
-        noise_metrics_epoch = {}
-        if val_loader:
-            model.eval()
-            val_loss = 0.0
-            val_steps = 0
+            # 🔧 改进的归一化处理
+            # 记录解码后的原始范围
+            raw_min, raw_max = images.min().item(), images.max().item()
             
-            # 用于噪声指标计算的累加器
-            total_noise_metrics = {
-                'noise_mse': 0.0,
-                'noise_mae': 0.0,
-                'noise_psnr': 0.0,
-                'noise_cosine_similarity': 0.0,
-                'noise_correlation': 0.0
-            }
-            
-            with torch.no_grad():
-                for images, labels in val_loader:
-                    images = images.to(device)
-                    labels = labels.to(device)
-                    
-                    outputs = model(images, class_labels=labels)
-                    loss = outputs['total_loss']  # 使用新的损失键名
-                    
-                    val_loss += loss.item()
-                    
-                    # 计算噪声预测指标
-                    if 'predicted_noise' in outputs and 'target_noise' in outputs:
-                        batch_noise_metrics = diffusion_metrics.calculate_all_metrics(
-                            outputs['predicted_noise'], 
-                            outputs['target_noise']
-                        )
-                        
-                        # 累加指标
-                        for key in total_noise_metrics.keys():
-                            if key in batch_noise_metrics:
-                                total_noise_metrics[key] += batch_noise_metrics[key]
-                    
-                    val_steps += 1
-            
-            avg_val_loss = val_loss / val_steps
-            
-            # 计算平均噪声指标
-            if val_steps > 0:
-                for key in total_noise_metrics.keys():
-                    noise_metrics_epoch[key] = total_noise_metrics[key] / val_steps
-            
-            # 整合验证结果到一行
-            if noise_metrics_epoch:
-                noise_mse = noise_metrics_epoch.get('noise_mse', 0)
-                noise_psnr = noise_metrics_epoch.get('noise_psnr', 0)
-                print(f"Val Loss: {avg_val_loss:.4f} | Noise MSE: {noise_mse:.6f} | PSNR: {noise_psnr:.2f}")
+            # 归一化到[0,1]，更鲁棒的处理
+            if raw_min >= -1.1 and raw_max <= 1.1:
+                # 标准情况：VAE输出在[-1,1]范围内
+                images = (images + 1.0) / 2.0
             else:
-                print(f"Val Loss: {avg_val_loss:.4f}")
-        else:
-            avg_val_loss = avg_epoch_loss
+                # 异常情况：使用min-max归一化
+                print(f"⚠️ VAE输出范围异常: [{raw_min:.3f}, {raw_max:.3f}], 使用自适应归一化")
+                images = (images - raw_min) / (raw_max - raw_min + 1e-8)
+            
+            # 最终裁剪到[0,1]
+            images = torch.clamp(images, 0.0, 1.0)
         
-        # FID评估 - 🆕 使用配置的评估间隔
-        fid_score = None
-        inception_score = None
-        eval_interval = config['fid_evaluation'].get('eval_interval', 20)  # 默认20个epoch
-        if fid_evaluator and (epoch + 1) % eval_interval == 0:
-            print(f"计算评估指标...")
-            try:
-                fid_start_time = time.time()
-                
-                # 🆕 使用配置的FID评估参数
-                num_samples = config['fid_evaluation'].get('num_samples', 2048)
-                batch_size = config['fid_evaluation'].get('batch_size', 3)
-                
-                fid_score = fid_evaluator.evaluate_model(
-                    model, 
-                    num_samples=num_samples,
-                    batch_size=batch_size,
-                    num_classes=config['unet']['num_classes']
-                )
-                fid_time = time.time() - fid_start_time
-                
-                # 计算IS分数（简化输出）
-                is_start_time = time.time()
-                
-                # 计算IS分数
-                print(f"  计算IS分数...")
-                is_start_time = time.time()
-                
-                # 生成样本用于IS计算
-                model.eval()
-                with torch.no_grad():
-                    generated_samples = []
-                    num_is_samples = min(200, val_dataset_len)  # IS分数样本数
-                    
-                    for i in range(0, num_is_samples, 8):  # 每次生成8个样本
-                        batch_size_is = min(8, num_is_samples - i)
-                        # 随机选择类别
-                        class_labels = torch.randint(0, config['unet']['num_classes'], 
-                                                    (batch_size_is,), device=device)
-                        
-                        generated_batch = model.sample(
-                            batch_size=batch_size_is,
-                            class_labels=class_labels,
-                            num_inference_steps=config['inference']['num_inference_steps'],  # 🆕 使用配置的推理步数
-                            guidance_scale=config['inference']['guidance_scale'],
-                        )
-                        
-                        # 反归一化到[0,1]
-                        generated_batch = denormalize_for_metrics(generated_batch)
-                        generated_samples.append(generated_batch)
-                    
-                    if generated_samples:
-                        all_generated = torch.cat(generated_samples, dim=0)
-                        is_mean, is_std = diffusion_metrics.inception_calculator.calculate_inception_score(
-                            all_generated, splits=5
-                        )
-                        inception_score = {'mean': is_mean, 'std': is_std}
-                        
-                        is_time = time.time() - is_start_time
-                        total_eval_time = fid_time + is_time
-                        print(f"FID: {fid_score:.2f} | IS: {is_mean:.2f}±{is_std:.2f} | Time: {total_eval_time:.1f}s")
-                
-                # 更新最佳FID
-                if fid_score < best_fid:
-                    best_fid = fid_score
-                    best_fid_model_path = os.path.join(save_dir, 'best_fid_model')
-                    save_model_checkpoint(
-                        model, 
-                        best_fid_model_path, 
-                        epoch=epoch+1, 
-                        extra_info={'fid_score': fid_score, 'best_fid': True}
-                    )
-                    print(f"🎉 新纪录！FID: {best_fid:.2f}")
-                
-            except Exception as e:
-                print(f"⚠️ 指标计算失败: {e}")
-        
-        # 记录训练日志
-        training_log['epochs'].append(epoch + 1)
-        training_log['train_loss'].append(avg_epoch_loss)
-        training_log['val_loss'].append(avg_val_loss)
-        training_log['fid_scores'].append(fid_score)
-        training_log['inception_scores'].append(inception_score)
-        training_log['noise_metrics'].append(noise_metrics_epoch)
-        training_log['learning_rates'].append(current_lr)
-        
-        # 保存训练日志
-        with open(os.path.join(log_dir, 'training_log.json'), 'w') as f:
-            json.dump(training_log, f, indent=2)
-        
-        # 保存最佳损失模型
-        if avg_val_loss < best_loss:
-            best_loss = avg_val_loss
-            best_model_path = os.path.join(save_dir, 'best_loss_model')
-            save_model_checkpoint(
-                model, 
-                best_model_path, 
-                epoch=epoch+1, 
-                extra_info={'val_loss': best_loss, 'best_loss': True}
-            )
-            print(f"🎉 新最佳损失: {best_loss:.4f}")
-        
-        # 定期保存checkpoint
-        if (epoch + 1) % config['training']['save_interval'] == 0:
-            checkpoint_path = os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}')
-            save_model_checkpoint(
-                model, 
-                checkpoint_path, 
-                epoch=epoch+1, 
-                extra_info={'train_loss': avg_epoch_loss, 'val_loss': avg_val_loss}
-            )
-            print(f"💾 保存checkpoint: {checkpoint_path}")
-        
-        # 生成样本图像
-        if (epoch + 1) % config['training']['sample_interval'] == 0:
-            print("  生成样本图像...")
-            save_sample_images(model, device, config, epoch + 1, sample_dir)
-        
-        print("-" * 80)
-        
-        # 如果损失连续异常，提前停止
-        if math.isinf(avg_epoch_loss):
-            print("❌ 训练损失异常，建议检查配置后重新开始")
-            break
+            # 🔧 质量检查
+            final_min, final_max = images.min().item(), images.max().item()
+            final_mean = images.mean().item()
+            
+            if final_mean < 0.1 or final_mean > 0.9:
+                print(f"⚠️ 生成图像亮度异常: 均值={final_mean:.3f}")
+            
+            print(f"✅ 采样完成，生成 {batch_size} 张图像")
+            print(f"   📊 最终图像范围: [{final_min:.3f}, {final_max:.3f}], 均值: {final_mean:.3f}")
+            return images
+            
+        except Exception as e:
+            print(f"⚠️ 图像解码失败: {e}")
+            # 返回一个默认的图像张量
+            return torch.zeros(batch_size, 3, 256, 256, device=device)
     
-    # 保存最终模型
-    final_model_path = os.path.join(save_dir, 'final_model')
-    save_model_checkpoint(
-        model, 
-        final_model_path, 
-        epoch=config['training']['epochs'], 
-        extra_info={
-            'final_train_loss': avg_epoch_loss,
-            'final_val_loss': avg_val_loss,
-            'best_fid': best_fid if best_fid != float('inf') else None,
-            'training_completed': True
-        }
-    )
-    
-    # 保存最终训练报告
-    final_report = {
-        'training_completed': True,
-        'total_epochs': config['training']['epochs'],
-        'best_train_loss': best_loss,
-        'best_fid_score': best_fid if best_fid != float('inf') else None,
-        'final_train_loss': avg_epoch_loss,
-        'final_val_loss': avg_val_loss,
-        'total_parameters': sum(p.numel() for p in model.unet.parameters()),
-        'device': str(device),
-        'config': config,
-        'effective_batch_size': effective_batch_size,  # 🆕 记录有效batch size
-        'gradient_accumulation_steps': accumulation_steps  # 🆕 记录梯度累积步数
-    }
-    
-    with open(os.path.join(save_dir, 'training_report.json'), 'w') as f:
-        json.dump(final_report, f, indent=2)
-    
-    print("=" * 80)
-    print(f"🎉 训练完成！")
-    print(f"  最终模型: {final_model_path}")
-    print(f"  最佳损失: {best_loss:.4f}")
-    if best_fid != float('inf'):
-        print(f"  最佳FID: {best_fid:.2f}")
-    print(f"  有效批次大小: {effective_batch_size}")
-    print(f"  训练日志: {os.path.join(log_dir, 'training_log.json')}")
-    print("=" * 80)
+    def get_loss_dict(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """获取损失字典 (兼容训练循环)"""
+        images = batch['image']
+        class_labels = batch.get('label', None)
+        
+        return self(images, class_labels)
 
-if __name__ == "__main__":
-    # 设置随机种子
-    torch.manual_seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(42)
+
+class ClassifierFreeGuidance:
+    """
+    无分类器引导 (Classifier-Free Guidance) 工具类
+    """
+    def __init__(self, guidance_scale: float = 7.5, unconditional_token: int = -1):
+        self.guidance_scale = guidance_scale
+        self.unconditional_token = unconditional_token
     
-    # 开始训练
-    train_ldm() 
+    def apply_cfg(
+        self,
+        noise_pred_uncond: torch.Tensor,
+        noise_pred_cond: torch.Tensor,
+        guidance_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        """
+        应用无分类器引导
+        Args:
+            noise_pred_uncond: 无条件噪声预测
+            noise_pred_cond: 有条件噪声预测
+            guidance_scale: 引导强度
+        Returns:
+            引导后的噪声预测
+        """
+        if guidance_scale is None:
+            guidance_scale = self.guidance_scale
+        
+        return noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+    
+    def prepare_labels_for_cfg(
+        self, 
+        labels: torch.Tensor,
+        dropout_prob: float = 0.1,
+        training: bool = True,
+    ) -> torch.Tensor:
+        """
+        为CFG训练准备标签
+        Args:
+            labels: 原始标签
+            dropout_prob: 条件丢弃概率
+            training: 是否为训练模式
+        Returns:
+            处理后的标签
+        """
+        if training and dropout_prob > 0:
+            dropout_mask = torch.rand(labels.shape[0], device=labels.device) < dropout_prob
+            unconditional_labels = torch.full_like(labels, self.unconditional_token)
+            return torch.where(dropout_mask, unconditional_labels, labels)
+        return labels 
