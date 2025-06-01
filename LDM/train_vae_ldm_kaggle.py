@@ -126,7 +126,7 @@ class VAELDMTrainer:
         
         for batch_idx, batch in enumerate(progress_bar):
             images = batch['image'].to(self.device)
-            labels = batch['label'].to(self.device)
+            labels = batch['label'].to(self.device, dtype=torch.long)
             
             # 前向传播
             losses = self.model(images, labels)
@@ -164,7 +164,7 @@ class VAELDMTrainer:
         
         # 生成样本用于FID计算
         num_samples = 150  # 3类 × 50样本
-        class_labels = torch.randint(0, 31, (num_samples,), device=self.device)
+        class_labels = torch.randint(0, 31, (num_samples,), device=self.device, dtype=torch.long)
         
         with torch.no_grad():
             generated_images, _ = self.model.sample(
