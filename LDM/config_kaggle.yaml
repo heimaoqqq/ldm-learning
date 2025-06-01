@@ -21,12 +21,12 @@ training:
   gradient_accumulation_steps: 2   # 梯度累积 (有效batch = 4×2 = 8)
   learning_rate: 0.0001              # 学习率
   weight_decay: 0.01               # 权重衰减
-  max_epochs: 100                  # 最大训练轮数
+  max_epochs: 300                  # 最大训练轮数 - 修改为300
   
   # 保存和日志配置
   log_interval: 10          # 日志记录间隔 (steps)
   save_interval_epochs: 50  # 模型保存间隔 (epochs) - 每50个epoch保存一次
-  eval_interval: 1         # FID评估间隔 (epochs)
+  eval_interval: 20         # FID评估间隔 (epochs) - 每20个epoch评估一次
   
   # Kaggle时间限制优化
   enable_wandb: false       # 禁用wandb (Kaggle环境)
@@ -39,7 +39,7 @@ evaluation:
   samples_per_class: 50     # 每类生成样本数
   ddim_steps: 50           # DDIM采样步数 (推理时)
   eta: 0.0                 # DDIM随机性参数
-  max_real_samples: 500    # 真实数据最大样本数
+  max_real_samples: 800    # 真实数据最大样本数
 
 # ================== 🎮 GPU优化配置 ==================
 gpu:
