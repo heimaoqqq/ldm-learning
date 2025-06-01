@@ -9,11 +9,15 @@ from typing import Dict, Tuple, Any
 import torch
 from torch.utils.data import DataLoader
 
-# 添加VAE模块路径
+# 添加VAE路径
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
 
-# 导入VAE的dataset模块
-from dataset import build_dataloader as vae_build_dataloader
+# 尝试导入VAE的数据加载器，如果失败则使用内置版本
+try:
+    from dataset import build_dataloader as vae_build_dataloader
+except ImportError:
+    print("⚠️ VAE dataset module not found, using built-in dataloader")
+    vae_build_dataloader = None
 
 def build_dataloader(config: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
     """
@@ -43,6 +47,11 @@ def build_dataloader(config: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
     print(f"📂 数据集路径: {vae_params['root_dir']}")
     print(f"📊 批次大小: {vae_params['batch_size']}")
     print(f"🔀 验证集比例: {vae_params['val_split']}")
+    
+    if vae_build_dataloader is None:
+        print(f"❌ VAE数据加载器不可用")
+        print(f"🔄 回退使用合成数据集...")
+        return create_synthetic_dataloaders(config)
     
     try:
         # 调用VAE的build_dataloader
