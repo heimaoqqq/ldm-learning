@@ -16,6 +16,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
 
 from adv_vq_vae import AdvVQVAE
 from simple_unet import SimpleUNet
+from simple_enhanced_unet import SimpleEnhancedUNet, create_simple_enhanced_unet  # 🚀 简化版增强UNet
 from scheduler import DDPMScheduler, DDIMScheduler
 
 class EMA:
@@ -70,14 +71,21 @@ class StableLDM(nn.Module):
         # 初始化VAE (预训练，冻结参数)
         self.vae = self._init_vae(config['vae'])
         
-        # 初始化U-Net
-        self.unet = SimpleUNet(
-            in_channels=config['unet']['in_channels'],
-            out_channels=config['unet']['out_channels'],
-            model_channels=config['unet']['model_channels'],
-            num_classes=config['unet']['num_classes'],
-            time_embed_dim=config['unet']['time_embed_dim'],
-        )
+        # 初始化U-Net - 🚀 支持简化增强版
+        unet_type = config['unet'].get('type', 'simple')  # 默认使用简单版本
+        
+        if unet_type == 'simple_enhanced':
+            print("🚀 使用简化增强版U-Net (包含多层Transformer)")
+            self.unet = create_simple_enhanced_unet(config)
+        else:
+            print("📋 使用简单版U-Net")
+            self.unet = SimpleUNet(
+                in_channels=config['unet']['in_channels'],
+                out_channels=config['unet']['out_channels'],
+                model_channels=config['unet']['model_channels'],
+                num_classes=config['unet']['num_classes'],
+                time_embed_dim=config['unet']['time_embed_dim'],
+            )
         
         # 初始化调度器
         scheduler_config = config['diffusion']
