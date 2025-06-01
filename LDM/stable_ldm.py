@@ -15,8 +15,7 @@ from tqdm import tqdm
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
 
 from adv_vq_vae import AdvVQVAE
-from simple_unet import SimpleUNet
-from simple_enhanced_unet import SimpleEnhancedUNet, create_simple_enhanced_unet  # 🚀 简化版增强UNet
+from simple_enhanced_unet import SimpleEnhancedUNet, create_simple_enhanced_unet  # 🚀 增强版UNet
 from scheduler import DDPMScheduler, DDIMScheduler
 
 class EMA:
@@ -78,14 +77,9 @@ class StableLDM(nn.Module):
             print("🚀 使用简化增强版U-Net (包含多层Transformer)")
             self.unet = create_simple_enhanced_unet(config)
         else:
-            print("📋 使用简单版U-Net")
-            self.unet = SimpleUNet(
-                in_channels=config['unet']['in_channels'],
-                out_channels=config['unet']['out_channels'],
-                model_channels=config['unet']['model_channels'],
-                num_classes=config['unet']['num_classes'],
-                time_embed_dim=config['unet']['time_embed_dim'],
-            )
+            print("📋 使用简化增强版U-Net (包含多层Transformer)")
+            # 所有情况下都使用增强版UNet
+            self.unet = create_simple_enhanced_unet(config)
         
         # 初始化调度器
         scheduler_config = config['diffusion']
