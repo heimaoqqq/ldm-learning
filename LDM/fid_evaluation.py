@@ -9,6 +9,7 @@ import sys
 import os
 from typing import Tuple, Optional, List
 from tqdm import tqdm
+import random
 
 # 在Kaggle环境中，VAE模块已复制到当前目录
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
@@ -315,7 +316,7 @@ class FIDEvaluator:
     def evaluate_model(self, model, num_samples: int = 1000, 
                       batch_size: int = 8, num_classes: int = 31,
                       num_inference_steps: int = 75, guidance_scale: float = 8.5, 
-                      eta: float = 0.3) -> float:
+                      eta: float = 0.3, eval_classes: int = 3) -> float:
         """
         评估模型的FID分数
         
@@ -323,10 +324,11 @@ class FIDEvaluator:
             model: LDM模型
             num_samples: 生成样本数
             batch_size: 批量大小
-            num_classes: 类别数
+            num_classes: 总类别数
             num_inference_steps: DDIM推理步数
             guidance_scale: CFG引导强度
             eta: DDIM随机性参数
+            eval_classes: 用于评估的类别数（随机选择）
         
         Returns:
             FID分数
@@ -336,6 +338,10 @@ class FIDEvaluator:
         
         model.eval()
         generated_images = []
+        
+        # 🎯 随机选择eval_classes个类别进行评估
+        selected_classes = random.sample(range(num_classes), min(eval_classes, num_classes))
+        print(f"  🎲 随机选择类别进行FID评估: {[c+1 for c in selected_classes]}")
         
         # 🔧 计算总批次数和创建进度条
         total_batches = (num_samples + batch_size - 1) // batch_size
@@ -349,21 +355,21 @@ class FIDEvaluator:
         
         # 生成样本
         with torch.no_grad():
-            samples_per_class = num_samples // num_classes
-            remaining_samples = num_samples % num_classes
+            samples_per_class = num_samples // len(selected_classes)
+            remaining_samples = num_samples % len(selected_classes)
             
-            for class_id in range(num_classes):
+            for i, class_id in enumerate(selected_classes):
                 # 每个类别生成相应数量的样本
                 current_samples = samples_per_class
-                if class_id < remaining_samples:
+                if i < remaining_samples:
                     current_samples += 1
                 
                 if current_samples == 0:
                     continue
                 
                 # 分批生成
-                for i in range(0, current_samples, batch_size):
-                    current_batch_size = min(batch_size, current_samples - i)
+                for j in range(0, current_samples, batch_size):
+                    current_batch_size = min(batch_size, current_samples - j)
                     class_labels = torch.tensor([class_id] * current_batch_size, 
                                                device=self.device)
                     
@@ -381,7 +387,7 @@ class FIDEvaluator:
                     # 🔧 更新进度条
                     progress_bar.update(1)
                     progress_bar.set_postfix({
-                        'class': f'{class_id+1}/{num_classes}',
+                        'class': f'ID_{class_id+1}',
                         'samples': len(generated_images) * batch_size
                     })
         
