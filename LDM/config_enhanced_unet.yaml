@@ -11,7 +11,7 @@ vae:
   beta: 0.25
   vq_ema_decay: 0.99
   groups: 1
-  model_path: '../VAE/vae_ckpt/checkpoint_epoch_100.pth'
+  model_path: '/kaggle/input/vae-best-fid'
   freeze: true
 
 # 🚀 简化增强版U-Net - 包含真正的多层Transformer
