@@ -14,7 +14,7 @@ import os
 
 # 添加VAE路径
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
-from advanced_vqvae import AdvancedVQVAE
+from adv_vq_vae import AdvVQVAE
 
 class VAELatentDiffusionModel(nn.Module):
     """
@@ -49,9 +49,9 @@ class VAELatentDiffusionModel(nn.Module):
         print(f"   U-Net类别数: {self.unet.num_classes}")
         print(f"   扩散步数: {self.diffusion.num_timesteps}")
         
-    def _load_vae(self, vae_config: Dict[str, Any], checkpoint_path: str) -> AdvancedVQVAE:
+    def _load_vae(self, vae_config: Dict[str, Any], checkpoint_path: str) -> AdvVQVAE:
         """加载预训练的VAE"""
-        vae = AdvancedVQVAE(**vae_config)
+        vae = AdvVQVAE(**vae_config)
         
         if checkpoint_path and os.path.exists(checkpoint_path):
             checkpoint = torch.load(checkpoint_path, map_location='cpu')
