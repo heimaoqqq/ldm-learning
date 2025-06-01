@@ -3,7 +3,7 @@
 
 # ================== 📁 路径配置 ==================
 paths:
-  vae_checkpoint: '/kaggle/working/VAE/best_fid_model.pt'  # VAE预训练权重
+  vae_checkpoint: '/kaggle/input/vae-best-fid/adv_vqvae_best_fid.pth'  # VAE预训练权重
   data_dir: '/kaggle/input/dataset'                       # 数据集路径
   save_dir: '/kaggle/working/checkpoints'                 # 模型保存路径
 
