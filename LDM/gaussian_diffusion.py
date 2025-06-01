@@ -418,7 +418,7 @@ class GaussianDiffusion:
             indices = tqdm(indices)
 
         for i in indices:
-            t = torch.tensor([i] * shape[0], device=device)
+            t = torch.tensor([i] * shape[0], device=device, dtype=torch.long)
             with torch.no_grad():
                 out = self.p_sample(
                     model,
@@ -544,7 +544,7 @@ class GaussianDiffusion:
             indices = tqdm(indices)
 
         for i in indices:
-            t = torch.tensor([i] * shape[0], device=device)
+            t = torch.tensor([i] * shape[0], device=device, dtype=torch.long)
             with torch.no_grad():
                 out = self.ddim_sample(
                     model,
@@ -810,7 +810,9 @@ class _WrappedModel:
         self.original_num_steps = original_num_steps
 
     def __call__(self, x, ts, **kwargs):
-        map_tensor = torch.tensor(self.timestep_map, device=ts.device, dtype=ts.dtype)
+        map_tensor = torch.tensor(self.timestep_map, device=ts.device, dtype=torch.long)
+        # 确保ts是正确的整数类型
+        ts = ts.long()
         new_ts = map_tensor[ts]
         if self.rescale_timesteps:
             new_ts = new_ts.float() * (1000.0 / self.original_num_steps)
