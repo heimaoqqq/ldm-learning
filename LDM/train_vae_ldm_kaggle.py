@@ -14,8 +14,20 @@ from tqdm import tqdm
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-# 添加VAE路径
-sys.path.append('/kaggle/working/VAE')
+# 添加VAE路径 - 适配不同环境
+vae_path_options = [
+    '/kaggle/working/VAE',  # Kaggle环境
+    os.path.join(os.path.dirname(__file__), '..', 'VAE'),  # 相对路径
+    '../VAE'  # 备用相对路径
+]
+
+for vae_path in vae_path_options:
+    if os.path.exists(vae_path):
+        sys.path.append(vae_path)
+        print(f"✅ VAE路径已添加: {vae_path}")
+        break
+else:
+    print("⚠️ 未找到VAE目录，可能导致导入错误")
 
 from vae_ldm import create_vae_ldm
 from dataset_adapter import build_dataloader
