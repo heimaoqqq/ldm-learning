@@ -147,7 +147,7 @@ performance:
   torch_num_threads: 8      # 设置PyTorch线程数
   
   # 编译优化
-  compile_model: true      # 🚀 关闭编译，确保训练稳定性
+  compile_model: false      # 🚀 P100 GPU (CUDA 6.0) 不支持 torch.compile (需要CUDA 7.0+)
   
   # 预取优化
   prefetch_factor: 4        # 数据预取倍数
