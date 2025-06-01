@@ -276,10 +276,10 @@ def create_default_config() -> Dict[str, Any]:
             'gradient_accumulation_steps': 2,
             'learning_rate': 1e-4,
             'weight_decay': 0.01,
-            'max_epochs': 100,
+            'max_epochs': 300,
             'log_interval': 10,
             'save_interval_epochs': 50,
-            'eval_interval': 10,
+            'eval_interval': 20,
             'enable_wandb': False,
             'num_workers': 2
         },
