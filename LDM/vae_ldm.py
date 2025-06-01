@@ -44,8 +44,11 @@ class VAELatentDiffusionModel(nn.Module):
         # 移动到设备
         self.to(device)
         
+        # 存储配置信息用于输出
+        self.vae_latent_dim = vae_config.get('latent_dim', 256)
+        
         print(f"✅ VAE-LDM 初始化完成")
-        print(f"   VAE潜在维度: {self.vae.latent_dim}")
+        print(f"   VAE潜在维度: {self.vae_latent_dim}")
         print(f"   U-Net类别数: {self.unet.num_classes}")
         print(f"   扩散步数: {self.diffusion.num_timesteps}")
         
@@ -56,7 +59,7 @@ class VAELatentDiffusionModel(nn.Module):
         if checkpoint_path and os.path.exists(checkpoint_path):
             try:
                 checkpoint = torch.load(checkpoint_path, map_location='cpu')
-                print(f"🔍 检查点文件键: {list(checkpoint.keys())}")
+                print(f"🔍 检查点文件包含 {len(checkpoint)} 个键")
                 
                 # 尝试不同的键名来加载模型状态
                 state_dict = None
