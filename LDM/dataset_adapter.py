@@ -84,17 +84,29 @@ class DataLoaderWrapper:
     def __iter__(self):
         """迭代器，转换数据格式"""
         for batch in self.original_loader:
-            if isinstance(batch, tuple) and len(batch) == 2:
-                # VAE格式: (images, labels)
+            # 检查batch的类型和格式
+            if isinstance(batch, (tuple, list)) and len(batch) == 2:
+                # VAE格式: (images, labels) 或 [images, labels]
                 images, labels = batch
                 # 转换为LDM格式: {'image': images, 'label': labels}
                 yield {
                     'image': images,
                     'label': labels
                 }
-            else:
+            elif isinstance(batch, dict):
                 # 如果已经是字典格式，直接返回
                 yield batch
+            else:
+                # 处理其他可能的格式
+                print(f"⚠️ 未知的批次格式: {type(batch)}")
+                if hasattr(batch, '__len__') and len(batch) >= 2:
+                    # 尝试取前两个元素
+                    yield {
+                        'image': batch[0],
+                        'label': batch[1]
+                    }
+                else:
+                    raise ValueError(f"无法处理的批次格式: {type(batch)}")
     
     def __len__(self):
         return len(self.original_loader)
