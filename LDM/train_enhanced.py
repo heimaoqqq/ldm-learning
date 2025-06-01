@@ -84,9 +84,13 @@ class EnhancedTrainer:
         progress_bar = tqdm(dataloader, desc=f'Epoch {epoch}')
         
         for batch_idx, batch in enumerate(progress_bar):
-            # 前向传播
-            loss_dict = self.model(batch['image'].to(self.device), 
-                                 batch.get('label', None))
+            # 前向传播 - 确保数据在正确的设备上
+            images = batch['image'].to(self.device)
+            labels = batch.get('label', None)
+            if labels is not None:
+                labels = labels.to(self.device)
+            
+            loss_dict = self.model(images, labels)
             
             loss = loss_dict['loss'] / self.gradient_accumulation_steps
             
