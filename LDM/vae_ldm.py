@@ -122,35 +122,30 @@ class VAELatentDiffusionModel(nn.Module):
         """
         self.vae.eval()
         
-        # 尝试直接使用VAE的编码器
+        # 尝试使用VAE的编码方法
         try:
-            # 方法1: 使用编码器 + 量化器
-            if hasattr(self.vae, 'encoder') and hasattr(self.vae, 'quantize'):
-                encoded = self.vae.encoder(images)
-                quantized, vq_loss, perplexity = self.vae.quantize(encoded)
-                return quantized
-                
-            # 方法2: 使用encode方法
-            elif hasattr(self.vae, 'encode'):
+            # 方法1: 使用encode方法 (最直接)
+            if hasattr(self.vae, 'encode'):
                 latents = self.vae.encode(images)
                 return latents
                 
-            # 方法3: 使用forward，但需要正确解析返回值
+            # 方法2: 使用编码器 + 量化器
+            elif hasattr(self.vae, 'encoder') and hasattr(self.vae, 'vq'):
+                encoded = self.vae.encoder(images)
+                quantized, vq_loss, perplexity = self.vae.vq(encoded)
+                return quantized
+                
+            # 方法3: 使用forward，解析返回值（最后备用）
             else:
                 vae_output = self.vae(images)
-                if isinstance(vae_output, tuple):
-                    # 寻找合适的张量作为潜在表示
-                    for i, item in enumerate(vae_output):
-                        if hasattr(item, 'shape') and len(item.shape) >= 3:  # 至少3D张量
-                            return item
-                    
-                    # 如果没找到合适的，使用第一个
-                    if len(vae_output) > 0:
-                        result = vae_output[0]
-                        return result
-                         
+                if isinstance(vae_output, tuple) and len(vae_output) >= 3:
+                    # VAE forward通常返回 (reconstruction, commitment_loss, codebook_loss)
+                    # 我们需要用编码器+量化获取潜在表示
+                    encoded = self.vae.encoder(images)
+                    quantized, _, _ = self.vae.vq(encoded)
+                    return quantized
                 else:
-                    return vae_output
+                    raise ValueError("Unexpected VAE output format")
                      
         except Exception as e:
             print(f"❌ VAE编码失败: {e}")
