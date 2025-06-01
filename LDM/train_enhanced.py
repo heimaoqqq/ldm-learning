@@ -22,7 +22,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'VAE'))
 from stable_ldm import create_stable_ldm
 from fid_evaluation import FIDEvaluator
 from metrics import DiffusionMetrics, denormalize_for_metrics
-from dataset_adapter import build_dataloader, CIFARDatasetAdapter
+from dataset_adapter import build_dataloader
 
 class EnhancedTrainer:
     """增强版LDM训练器"""
@@ -99,9 +99,10 @@ class EnhancedTrainer:
         os.makedirs(self.save_dir, exist_ok=True)
         
         print("✅ 训练器初始化完成")
-        print(f"📊 数据集信息: 训练集4587样本, 验证集510样本")
         print(f"🎯 优化配置: batch_size=8, 梯度累积=3, 有效batch=24")
         print(f"📈 学习率调整: 0.00008 (适配batch size变化)")
+        print(f"📂 数据集路径: {self.config['dataset']['root_dir']}")
+        print(f"🚫 数据增强: 已禁用 (保护时频图物理意义)")
         
     def check_gradient_health(self) -> dict:
         """检查梯度健康状况"""
@@ -365,11 +366,11 @@ class EnhancedTrainer:
         print("  - P100显存友好设计")
         print("  - 集成完整指标评估：IS、噪声精度、FID等")
         print("=" * 80)
-        print("🎯 针对样本数优化:")
-        print(f"  - 训练集: 4587样本 (batch_size=8, 梯度累积=3)")
-        print(f"  - 验证集: 510样本 (用于FID评估)")
-        print(f"  - 学习率: 0.00008 (适配batch size调整)")
-        print(f"  - 早停耐心: 40轮 (适配小数据集)")
+        print("🎯 训练配置优化:")
+        print(f"  - batch_size: {self.config['dataset']['batch_size']}")
+        print(f"  - 梯度累积: {self.gradient_accumulation_steps}")
+        print(f"  - 学习率: {self.config['training']['lr']}")
+        print(f"  - 早停耐心: {self.early_stopping_patience}轮")
         print("=" * 80)
         
         # 🚀 构建优化的数据加载器
