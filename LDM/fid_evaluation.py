@@ -304,7 +304,8 @@ class FIDEvaluator:
     
     def evaluate_model(self, model, num_samples: int = 1000, 
                       batch_size: int = 8, num_classes: int = 31,
-                      num_inference_steps: int = 250, guidance_scale: float = 7.5) -> float:
+                      num_inference_steps: int = 75, guidance_scale: float = 8.5, 
+                      eta: float = 0.3) -> float:
         """
         评估模型的FID分数
         
@@ -315,6 +316,7 @@ class FIDEvaluator:
             num_classes: 类别数
             num_inference_steps: DDIM推理步数
             guidance_scale: CFG引导强度
+            eta: DDIM随机性参数
         
         Returns:
             FID分数
@@ -360,6 +362,7 @@ class FIDEvaluator:
                         class_labels=class_labels,
                         num_inference_steps=num_inference_steps,  # 🔧 使用传入的推理步数
                         guidance_scale=guidance_scale,  # 🔧 使用传入的引导强度
+                        eta=eta,  # 🚀 新增：使用DDIM随机性
                         verbose=False  # 🔧 关闭sample方法内部的详细输出
                     )
                     
