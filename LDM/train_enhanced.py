@@ -128,9 +128,8 @@ class EnhancedTrainer:
             # 更新进度条
             progress_bar.set_postfix({
                 'Loss': f'{epoch_losses[-1]:.4f}',
-                'Noise MSE': f'{noise_metrics.get("noise_mse", 0):.4f}',
-                'Noise PSNR': f'{noise_metrics.get("noise_psnr", 0):.2f}',
-                'Cosine Sim': f'{noise_metrics.get("noise_cosine_similarity", 0):.3f}'
+                'PSNR': f'{noise_metrics.get("noise_psnr", 0):.4f}dB',
+                'Cosine': f'{noise_metrics.get("noise_cosine_similarity", 0):.4f}'
             })
         
         # 计算epoch平均指标
@@ -162,7 +161,8 @@ class EnhancedTrainer:
                 num_classes=self.config['unet']['num_classes'],
                 num_inference_steps=self.config['inference']['num_inference_steps'],
                 guidance_scale=self.config['inference']['guidance_scale'],
-                eta=self.config['inference']['eta']
+                eta=self.config['inference']['eta'],
+                eval_classes=3  # 🎯 只评估3个随机类别
             )
             
             # 恢复原始权重
@@ -196,9 +196,23 @@ class EnhancedTrainer:
                 )
                 
                 # 计算IS分数
-                is_mean, is_std = self.metrics_calculator.inception_calculator.calculate_inception_score(
-                    generated_images.cpu()
-                )
+                try:
+                    # 确保图像在正确范围内
+                    images_for_is = torch.clamp(generated_images.cpu(), 0, 1)
+                    
+                    is_mean, is_std = self.metrics_calculator.inception_calculator.calculate_inception_score(
+                        images_for_is, splits=min(10, num_samples//2)
+                    )
+                    
+                    # 验证IS分数合理性
+                    if is_mean < 1.0 or is_mean > 50.0:
+                        print(f"⚠️ IS分数异常: {is_mean:.3f}, 可能计算有误")
+                    
+                    return is_mean, is_std
+                    
+                except Exception as e:
+                    print(f"⚠️ IS分数计算失败: {e}")
+                    return None, None
                 
                 # 保存样本
                 if epoch % self.config['training']['sample_interval'] == 0:
@@ -209,8 +223,6 @@ class EnhancedTrainer:
                         nrow=4, normalize=True, value_range=(0, 1)
                     )
                     print(f"📸 样本已保存: {sample_path}")
-                
-                return is_mean, is_std
                 
         except Exception as e:
             print(f"⚠️ 样本生成失败: {e}")
@@ -286,12 +298,11 @@ class EnhancedTrainer:
             # 打印详细指标
             print(f"\n📊 Epoch {epoch} 指标总结:")
             print(f"  训练损失: {epoch_metrics['loss']:.4f}")
-            print(f"  噪声MSE: {epoch_metrics['noise_mse']:.4f}")
             print(f"  噪声PSNR: {epoch_metrics['noise_psnr']:.2f}dB")
-            print(f"  余弦相似度: {epoch_metrics['noise_cosine_similarity']:.3f}")
-            print(f"  相关系数: {epoch_metrics['noise_correlation']:.3f}")
+            print(f"  余弦相似度: {epoch_metrics['noise_cosine_similarity']:.6f}")
+            print(f"  相关系数: {epoch_metrics['noise_correlation']:.6f}")
             if 'inception_score_mean' in epoch_metrics:
-                print(f"  IS分数: {epoch_metrics['inception_score_mean']:.2f} ± {epoch_metrics['inception_score_std']:.2f}")
+                print(f"  IS分数: {epoch_metrics['inception_score_mean']:.3f} ± {epoch_metrics['inception_score_std']:.3f}")
             if 'fid_score' in epoch_metrics:
                 print(f"  FID分数: {epoch_metrics['fid_score']:.2f}")
             print("-" * 60)
