@@ -54,16 +54,55 @@ class VAELatentDiffusionModel(nn.Module):
         vae = AdvVQVAE(**vae_config)
         
         if checkpoint_path and os.path.exists(checkpoint_path):
-            checkpoint = torch.load(checkpoint_path, map_location='cpu')
-            vae.load_state_dict(checkpoint['model_state_dict'])
-            print(f"✅ VAE 权重加载成功: {checkpoint_path}")
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location='cpu')
+                print(f"🔍 检查点文件键: {list(checkpoint.keys())}")
+                
+                # 尝试不同的键名来加载模型状态
+                state_dict = None
+                
+                # 尝试常见的键名
+                possible_keys = [
+                    'model_state_dict',  # 标准格式
+                    'state_dict',        # 简化格式
+                    'model',             # 另一种格式
+                    'vae_state_dict',    # VAE特定格式
+                ]
+                
+                for key in possible_keys:
+                    if key in checkpoint:
+                        state_dict = checkpoint[key]
+                        print(f"✅ 使用键 '{key}' 加载VAE权重")
+                        break
+                
+                # 如果没有找到合适的键，检查是否直接是状态字典
+                if state_dict is None:
+                    # 检查是否整个checkpoint就是状态字典
+                    if isinstance(checkpoint, dict) and any(k.startswith(('encoder', 'decoder', 'quantize', 'quant_conv', 'post_quant_conv')) for k in checkpoint.keys()):
+                        state_dict = checkpoint
+                        print("✅ 检查点直接是状态字典格式")
+                    else:
+                        print(f"❌ 无法找到VAE状态字典，可用键: {list(checkpoint.keys())}")
+                        raise KeyError(f"无法在检查点中找到模型状态字典。可用键: {list(checkpoint.keys())}")
+                
+                # 加载状态字典
+                vae.load_state_dict(state_dict)
+                print(f"✅ VAE 权重加载成功: {checkpoint_path}")
+                
+            except Exception as e:
+                print(f"❌ VAE加载失败: {e}")
+                print(f"🔄 将使用随机初始化的VAE权重")
+                print("   警告：这可能导致训练性能下降")
         else:
             print(f"⚠️  VAE checkpoint 未找到: {checkpoint_path}")
+            print("🔄 将使用随机初始化的VAE权重")
             
         # 冻结VAE参数
         for param in vae.parameters():
             param.requires_grad = False
         vae.eval()
+        
+        print(f"🔒 VAE参数已冻结（{sum(p.numel() for p in vae.parameters())} 参数）")
         
         return vae
     
