@@ -42,7 +42,7 @@ class EnhancedTrainer:
         self.metrics_calculator = DiffusionMetrics(self.device)
         
         # 创建FID评估器
-        self.fid_evaluator = FIDEvaluator(self.config, self.device)
+        self.fid_evaluator = FIDEvaluator(self.device)
         
         # 设置优化器
         self.optimizer = optim.AdamW(
