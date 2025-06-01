@@ -11,7 +11,7 @@ vae:
   beta: 0.25
   vq_ema_decay: 0.99
   groups: 1
-  model_path: '/kaggle/input/vae-best-fid'
+  model_path: '../VAE/vae_ckpt/checkpoint_epoch_100.pth'
   freeze: true
 
 # 🚀 简化增强版U-Net - 包含真正的多层Transformer
@@ -24,12 +24,12 @@ unet:
   time_embed_dim: 768        # 合理的嵌入维度
   
   # 🚀 真正的Transformer配置
-  transformer_depth: 2       # 每个注意力层2层Transformer
+  transformer_depth: 3       # 每个注意力层3层Transformer
   num_heads: 8               # 8个注意力头
   use_attention_layers: [1, 2]  # 在第1层和第2层使用多层注意力
   
   # 说明：
-  # - 6个注意力层 × 2层Transformer = 12个Transformer块
+  # - 6个注意力层 × 3层Transformer = 18个Transformer块
   # - 比简单版多50.3M参数，但增加了强大的空间注意力能力
   # - 预期能显著改善FID值
 
