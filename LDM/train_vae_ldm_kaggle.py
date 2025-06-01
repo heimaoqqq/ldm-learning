@@ -350,10 +350,24 @@ def validate_paths(config: Dict[str, Any]) -> bool:
     paths = config['paths']
     
     # 检查VAE检查点
-    if not os.path.exists(paths['vae_checkpoint']):
-        print(f"❌ VAE检查点未找到: {paths['vae_checkpoint']}")
-        print("请确保VAE模型已训练完成并上传到正确位置")
-        return False
+    vae_checkpoint_exists = os.path.exists(paths['vae_checkpoint'])
+    if not vae_checkpoint_exists:
+        print(f"⚠️ VAE检查点未找到: {paths['vae_checkpoint']}")
+        print("🔄 将使用随机初始化的VAE（性能会下降）")
+        print("💡 建议:")
+        print("   1. 检查VAE检查点路径是否正确")
+        print("   2. 确保VAE模型已训练完成并上传")
+        print("   3. 可以先用随机VAE进行测试")
+        
+        # 询问是否继续
+        print("\n❓ 是否继续训练？(Kaggle环境自动继续)")
+        # 在Kaggle环境中自动继续，本地环境可以选择
+        if '/kaggle/' not in paths.get('data_dir', ''):
+            response = input("输入 'y' 继续，其他键退出: ").lower()
+            if response != 'y':
+                return False
+    else:
+        print(f"✅ VAE检查点找到: {paths['vae_checkpoint']}")
     
     # 检查数据集
     if not os.path.exists(paths['data_dir']):
@@ -364,7 +378,7 @@ def validate_paths(config: Dict[str, Any]) -> bool:
     # 创建保存目录
     os.makedirs(paths['save_dir'], exist_ok=True)
     
-    print("✅ 路径验证通过")
+    print("✅ 路径验证完成")
     return True
 
 def convert_config_to_trainer_args(config: Dict[str, Any]) -> Dict[str, Any]:
