@@ -229,7 +229,7 @@ def extract_features_from_images(feature_extractor: InceptionV3Features,
             images = denormalize(images)
         
         # 分批处理以节省内存
-        batch_size = 32
+        batch_size = 64  # 🚀 从32增加到64，尝试加速特征提取
         features_list = []
         
         for i in range(0, images.size(0), batch_size):
