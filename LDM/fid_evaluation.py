@@ -316,7 +316,8 @@ class FIDEvaluator:
     def evaluate_model(self, model, num_samples: int = 1000, 
                       batch_size: int = 8, num_classes: int = 31,
                       num_inference_steps: int = 75, guidance_scale: float = 8.5, 
-                      eta: float = 0.3, eval_classes: int = 3) -> float:
+                      eta: float = 0.3, eval_classes: int = 3,
+                      parallel_generation: bool = False) -> float:
         """
         评估模型的FID分数
         
@@ -329,6 +330,7 @@ class FIDEvaluator:
             guidance_scale: CFG引导强度
             eta: DDIM随机性参数
             eval_classes: 用于评估的类别数（随机选择）
+            parallel_generation: 是否启用并行生成优化
         
         Returns:
             FID分数
@@ -343,11 +345,31 @@ class FIDEvaluator:
         selected_classes = random.sample(range(num_classes), min(eval_classes, num_classes))
         print(f"  🎲 随机选择类别进行FID评估: {[c+1 for c in selected_classes]}")
         
+        # 🚀 资源优化：根据available显存动态调整batch size
+        if parallel_generation and torch.cuda.is_available():
+            # 检查可用显存
+            available_memory = torch.cuda.get_device_properties(0).total_memory
+            used_memory = torch.cuda.memory_allocated(0)
+            free_memory = available_memory - used_memory
+            
+            # 动态调整batch size（保守估计）
+            if free_memory > 8 * 1024**3:  # 8GB以上
+                batch_size = min(batch_size * 2, 32)  # 最多32
+                print(f"  🚀 显存充足，增加batch size到: {batch_size}")
+            elif free_memory > 4 * 1024**3:  # 4GB以上
+                batch_size = min(batch_size * 1.5, 24)  # 最多24
+                batch_size = int(batch_size)
+        
         # 🔧 计算总批次数和创建进度条
-        total_batches = (num_samples + batch_size - 1) // batch_size
+        samples_per_class = num_samples // len(selected_classes)
+        remaining_samples = num_samples % len(selected_classes)
+        total_samples = sum(samples_per_class + (1 if i < remaining_samples else 0) 
+                           for i in range(len(selected_classes)))
+        total_batches = (total_samples + batch_size - 1) // batch_size
+        
         progress_bar = tqdm(
             total=total_batches, 
-            desc=f"  FID生成({num_inference_steps}步)", 
+            desc=f"  🚀 FID生成({num_inference_steps}步)", 
             unit="batch",
             ncols=80,  # 控制进度条宽度
             leave=False  # 完成后清除进度条
@@ -355,9 +377,6 @@ class FIDEvaluator:
         
         # 生成样本
         with torch.no_grad():
-            samples_per_class = num_samples // len(selected_classes)
-            remaining_samples = num_samples % len(selected_classes)
-            
             for i, class_id in enumerate(selected_classes):
                 # 每个类别生成相应数量的样本
                 current_samples = samples_per_class
@@ -372,6 +391,10 @@ class FIDEvaluator:
                     current_batch_size = min(batch_size, current_samples - j)
                     class_labels = torch.tensor([class_id] * current_batch_size, 
                                                device=self.device)
+                    
+                    # 🚀 显存优化：及时清理缓存
+                    if j % (batch_size * 4) == 0 and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                     
                     images = model.sample(
                         batch_size=current_batch_size,
@@ -388,14 +411,18 @@ class FIDEvaluator:
                     progress_bar.update(1)
                     progress_bar.set_postfix({
                         'class': f'ID_{class_id+1}',
-                        'samples': len(generated_images) * batch_size
+                        'batch_sz': current_batch_size,
+                        'total': len(generated_images) * batch_size
                     })
         
         progress_bar.close()  # 关闭进度条
         
         # 合并所有生成的图像
         all_generated = torch.cat(generated_images, dim=0)
-        print(f"  计算FID分数...")
+        print(f"  🔧 计算FID分数 (总样本: {all_generated.shape[0]})...")
+        
+        # 🚀 批量特征提取优化
+        print(f"  🚀 使用优化的特征提取 (batch_size={min(64, all_generated.shape[0])})...")
         
         # 计算FID
         fid_score = self.calculate_fid_score(all_generated)
