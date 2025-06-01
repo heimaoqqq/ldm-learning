@@ -1,61 +1,52 @@
-# Stable Diffusion LDM Project Requirements
-# 包含VAE和轻量化Stable LDM训练所需的完整依赖项
+# VAE-LDM Kaggle训练项目依赖
+# 基于OpenAI improved-diffusion架构的VAE潜在扩散模型
 
-# ===== Core Dependencies =====
-torch>=2.0.0                # PyTorch核心 
-torchvision>=0.15.0          # 图像模型和变换（InceptionV3 for FID）
-torchaudio>=2.0.0            # 音频处理（可选）
+# ===== 核心深度学习框架 =====
+torch>=2.0.0                # PyTorch核心 - VAE-LDM模型训练
+torchvision>=0.15.0          # 图像模型和变换 - InceptionV3用于FID评估
+numpy>=1.21.0                # 数值计算 - 张量操作和数学运算
 
-# ===== Data Processing =====
-numpy>=1.21.0                # 数值计算
-pillow>=8.3.0               # PIL图像处理
-opencv-python>=4.5.0        # 图像处理
-scikit-learn>=1.0.0         # 数据划分
+# ===== 图像处理 =====
+pillow>=8.3.0               # PIL图像处理 - 数据集加载和预处理
+opencv-python>=4.5.0        # 图像处理 - 数据增强和变换
 
-# ===== Training and Evaluation =====
-tqdm>=4.62.0                # 进度条显示
-matplotlib>=3.5.0           # 图像可视化和样本保存
-scipy>=1.7.0                # FID计算中的Fréchet距离
-pyyaml>=6.0                 # 配置文件解析
+# ===== 配置和工具 =====
+pyyaml>=6.0                 # YAML配置文件解析 - config_kaggle.yaml
+tqdm>=4.62.0                # 进度条显示 - 训练过程可视化
 
-# ===== Model Architecture =====
-einops>=0.4.0               # 张量操作（可选，用于复杂变换）
+# ===== 评估指标 =====
+scipy>=1.7.0                # 科学计算 - FID分数计算中的统计函数
+matplotlib>=3.5.0           # 图像可视化 - 样本保存和训练监控
 
-# ===== Model Evaluation and Metrics =====
-torch-fidelity==0.3.0      # 官方FID计算库（可选，作为验证）
-lpips>=0.1.4                # LPIPS感知距离计算
+# ===== VAE-LDM项目特定功能 =====
+# torch.nn - U-Net和VAE架构 (内置)
+# torch.optim - AdamW优化器 (内置) 
+# torch.utils.data - 数据加载器 (内置)
+# torch.nn.functional - 损失函数和激活函数 (内置)
 
-# ===== Stable LDM特定需求 =====
-# 以下依赖支持新的轻量化Stable Diffusion架构：
-# - torchvision.models: InceptionV3预训练模型（FID评估）
-# - scipy.linalg: 协方差矩阵计算（FID分数）
-# - torch.cuda.amp: 自动混合精度训练
-# - torch.optim: AdamW优化器和学习率调度
+# ===== 可选依赖 (Kaggle通常已预装) =====
+# wandb>=0.13.0             # 实验跟踪 (禁用于Kaggle)
+# tensorboard>=2.6.0        # 训练可视化 (可选)
 
-# ===== VAE特定依赖 =====  
-# (所有已在上述包中包含)
-
-# ===== Performance优化 =====
-# accelerate>=0.20.0        # 分布式训练加速（可选）
-# wandb>=0.13.0             # 实验跟踪（可选）
-
-# ===== Development Tools (Optional) =====
-# jupyter>=1.0.0            # Jupyter Notebook
-# ipywidgets>=7.6.0         # 交互式组件
-# tensorboard>=2.6.0        # 可视化训练过程
-
-# ===== 环境兼容性说明 =====
-# Kaggle环境: 以下依赖通常已预装
-# 本地环境: 请确保安装所有核心依赖
+# ===== Kaggle环境说明 =====
+# 以下包在Kaggle中通常已预装，无需额外安装：
+# - torch, torchvision, numpy, matplotlib, scipy, pillow, opencv-python, tqdm, pyyaml
 #
-# 内置模块 (无需安装):
-# - uuid, argparse, json, os, sys, time, math
-# - typing, glob, shutil, random
+# 内置Python模块 (无需安装):
+# - os, sys, math, typing, datetime, argparse
+# - json, uuid, glob, shutil, random
 
-# ===== 安装说明 =====
-# 安装核心依赖:
-# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# ===== 本地安装说明 =====
+# GPU版本 (推荐):
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 # pip install -r requirements.txt
 #
-# GPU支持: 确保CUDA版本与PyTorch兼容
-# 内存要求: 建议8GB+ GPU内存用于训练
+# CPU版本:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# pip install -r requirements.txt
+
+# ===== 系统要求 =====
+# GPU: 推荐8GB+ VRAM (P100/V100/A100)
+# RAM: 推荐16GB+ 系统内存
+# 存储: 5GB+ 可用空间 (模型、数据集、checkpoints)
+# CUDA: 11.8+ (如使用GPU)
