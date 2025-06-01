@@ -174,9 +174,19 @@ def extract_features_from_dataloader(feature_extractor: InceptionV3Features,
     feature_extractor.eval()
     with torch.no_grad():
         pbar = tqdm(dataloader, desc=description)
-        for batch_idx, (images, _) in enumerate(pbar):
+        for batch_idx, batch in enumerate(pbar):
             if max_samples and sample_count >= max_samples:
                 break
+            
+            # 处理不同的数据格式
+            if isinstance(batch, dict):
+                # 字典格式: {'image': images, 'label': labels}
+                images = batch['image']
+            elif isinstance(batch, (tuple, list)) and len(batch) >= 2:
+                # 元组格式: (images, labels)
+                images = batch[0]
+            else:
+                raise ValueError(f"不支持的批次格式: {type(batch)}")
                 
             images = images.to(feature_extractor.device)
             
