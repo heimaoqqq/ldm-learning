@@ -245,9 +245,9 @@ class StableLDM(nn.Module):
         self, 
         batch_size: int, 
         class_labels: Optional[torch.Tensor] = None,
-        num_inference_steps: int = 50,
-        guidance_scale: float = 7.5,
-        eta: float = 0.0,
+        num_inference_steps: int = 75,
+        guidance_scale: float = 8.5,
+        eta: float = 0.3,
         use_ema: bool = False,
         verbose: bool = True
     ) -> torch.Tensor:
