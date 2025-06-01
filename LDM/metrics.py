@@ -126,25 +126,33 @@ class NoiseMetrics:
             target_flat = target_noise.flatten(1)
             cosine_sim = F.cosine_similarity(pred_flat, target_flat, dim=1).mean().item()
             
-            # 相关系数 (皮尔逊相关系数) - 重写版本
+            # 相关系数 (皮尔逊相关系数) - 改进版本
             correlation_list = []
             
             for i in range(pred_flat.shape[0]):
-                pred_vec = pred_flat[i].cpu().numpy()
-                target_vec = target_flat[i].cpu().numpy()
+                pred_vec = pred_flat[i].cpu().numpy().flatten()
+                target_vec = target_flat[i].cpu().numpy().flatten()
                 
                 # 使用numpy计算皮尔逊相关系数
-                if np.std(pred_vec) > 1e-8 and np.std(target_vec) > 1e-8:
-                    corr_matrix = np.corrcoef(pred_vec, target_vec)
-                    correlation_sample = corr_matrix[0, 1]
-                    if not np.isnan(correlation_sample):
-                        correlation_list.append(correlation_sample)
+                try:
+                    # 检查标准差是否足够大
+                    if np.std(pred_vec) > 1e-8 and np.std(target_vec) > 1e-8:
+                        # 计算相关系数矩阵
+                        corr_matrix = np.corrcoef(pred_vec, target_vec)
+                        correlation_sample = corr_matrix[0, 1]
+                        
+                        # 检查结果有效性
+                        if np.isfinite(correlation_sample):
+                            correlation_list.append(float(correlation_sample))
+                        else:
+                            correlation_list.append(0.0)
                     else:
                         correlation_list.append(0.0)
-                else:
+                except Exception:
                     correlation_list.append(0.0)
             
-            correlation = np.mean(correlation_list)
+            # 计算平均值
+            correlation = float(np.mean(correlation_list)) if correlation_list else 0.0
             
             return {
                 'noise_mse': mse,
