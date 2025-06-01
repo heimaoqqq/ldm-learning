@@ -99,7 +99,7 @@ training:
 fid_evaluation:
   enabled: true
   eval_interval: 5         # 🚀 每5个epoch评估一次
-  num_samples: 1500        # 🚀 从2000降到1500，适配验证集规模
+  num_samples: 1000        # 🚀 从2000降到1500，适配验证集规模
   batch_size: 64           # 🚀 保持64用于FID评估
   max_real_samples: 510    # 🚀 使用全部验证集样本
   save_best_fid_model: true
