@@ -61,17 +61,21 @@ unet:
 # 训练配置 - 高质量训练
 training:
   epochs: 600  # 🎯 大幅增加训练轮数
-  lr: 0.00005  # 🎯 更小学习率，精细调优
-  weight_decay: 0.01
+  lr: 0.0001   # 🚀 提高学习率：0.00005->0.0001
+  weight_decay: 0.02  # 🚀 增加正则化：0.01->0.02
   warmup_steps: 5000  # 🎯 更长warmup
   
   # 梯度累积 - 大模型训练
   gradient_accumulation_steps: 4  # 🎯 累积梯度等效batch64
   
+  # 早停策略
+  early_stopping_patience: 50  # 🚀 新增：50个epoch无改善则停止
+  early_stopping_metric: "fid"  # 🚀 基于FID值早停
+  
   # 保存设置
   save_dir: "fid_optimized_models"
   save_interval: 50
-  sample_interval: 30  # 🎯 更频繁生成样本监控
+  sample_interval: 25  # 🎯 更频繁生成样本监控
   log_interval: 20
   
   # 损失配置 - 混合损失
@@ -79,13 +83,13 @@ training:
   
   # Classifier-Free Guidance - 强化
   use_cfg: true
-  cfg_dropout_prob: 0.1  # 🎯 降低dropout，提高条件遵循
+  cfg_dropout_prob: 0.15  # 🚀 稍微增加dropout：0.1->0.15
   
   # 优化器配置
   optimizer: "adamw"
   beta1: 0.9
   beta2: 0.999
-  eps: 0.00000001
+  eps: 1e-8
   
   # 梯度裁剪
   grad_clip_norm: 0.5  # 🎯 更严格的梯度裁剪
@@ -97,17 +101,17 @@ training:
 # FID评估配置 - 高精度评估
 fid_evaluation:
   enabled: true
-  eval_interval: 30  # 🚀 降低评估频率：25->30 epoch
-  num_samples: 1000  # 🚀 减少样本数：5000->1000
-  batch_size: 32     # 🚀 增大batch size：20->32  
-  max_real_samples: 1000  # 🚀 减少真实样本数：5000->1000
+  eval_interval: 25         # 🚀 提高评估频率：50->25 epoch
+  num_samples: 2000         # 🚀 增加样本数：1000->2000
+  batch_size: 32            # 保持不变
+  max_real_samples: 2000    # 🚀 增加真实样本数：1000->2000
   save_best_fid_model: true
 
 # 推理配置 - 高质量采样
 inference:
-  num_inference_steps: 50   # 🚀 大幅减少：250->50步
-  guidance_scale: 7.5       # 🚀 降低CFG强度：12.0->7.5
-  eta: 0.0  # DDIM确定性采样
+  num_inference_steps: 75   # 🚀 增加采样步数：50->75
+  guidance_scale: 8.5       # 🚀 稍微提高CFG：7.5->8.5  
+  eta: 0.3                  # 🚀 添加适量随机性：0.0->0.3
   
   # 采样配置
   sample_batch_size: 8
