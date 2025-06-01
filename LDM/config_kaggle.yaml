@@ -1,0 +1,66 @@
+# VAE-LDM Kaggle训练配置
+# 🎯 适配P100 GPU的资源限制
+
+# ================== 📁 路径配置 ==================
+paths:
+  vae_checkpoint: '/kaggle/working/VAE/best_fid_model.pt'  # VAE预训练权重
+  data_dir: '/kaggle/input/dataset'                       # 数据集路径
+  save_dir: '/kaggle/working/checkpoints'                 # 模型保存路径
+
+# ================== 🎛️ 模型配置 ==================
+model:
+  num_classes: 31           # 微多普勒信号类别数
+  image_size: 32           # VAE潜在空间分辨率 (32×32) 
+  diffusion_steps: 1000    # 扩散步数
+  noise_schedule: "cosine" # 噪声调度 [linear, cosine]
+
+# ================== 🏃 训练配置 ==================
+training:
+  # P100优化配置
+  batch_size: 4                    # 基础batch size
+  gradient_accumulation_steps: 2   # 梯度累积 (有效batch = 4×2 = 8)
+  learning_rate: 0.0001              # 学习率
+  weight_decay: 0.01               # 权重衰减
+  max_epochs: 100                  # 最大训练轮数
+  
+  # 保存和日志配置
+  log_interval: 10          # 日志记录间隔 (steps)
+  save_interval_epochs: 50  # 模型保存间隔 (epochs) - 每50个epoch保存一次
+  eval_interval: 10         # FID评估间隔 (epochs)
+  
+  # Kaggle时间限制优化
+  enable_wandb: false       # 禁用wandb (Kaggle环境)
+  num_workers: 2           # 数据加载器工作进程数
+
+# ================== 📊 评估配置 ==================
+evaluation:
+  # FID评估优化 (减少计算时间)
+  eval_classes: 3           # 评估的类别数 (随机选择)
+  samples_per_class: 50     # 每类生成样本数
+  ddim_steps: 50           # DDIM采样步数 (推理时)
+  eta: 0.0                 # DDIM随机性参数
+  max_real_samples: 500    # 真实数据最大样本数
+
+# ================== 🎮 GPU优化配置 ==================
+gpu:
+  device: 'cuda'           # 设备
+  mixed_precision: false   # 混合精度 (P100不支持)
+  gradient_clip: 1.0       # 梯度裁剪
+
+# ================== 🎨 采样配置 ==================
+sampling:
+  guidance_scale: 1.0      # 分类器自由引导强度
+  use_ddim: true          # 使用DDIM采样
+  num_inference_steps: 50  # 推理步数
+
+# ================== 📝 实验记录 ==================
+experiment:
+  name: "VAE-LDM-Kaggle"   # 实验名称
+  description: "基于improved-diffusion的VAE潜在扩散模型 - Kaggle P100优化版"
+  version: "v1.0"
+  
+# ================== 🔧 调试配置 ==================
+debug:
+  verbose: true            # 详细输出
+  save_samples: true       # 保存生成样本
+  profile: false          # 性能分析 (调试用) 
