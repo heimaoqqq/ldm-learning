@@ -126,15 +126,31 @@ class NoiseMetrics:
             target_flat = target_noise.flatten(1)
             cosine_sim = F.cosine_similarity(pred_flat, target_flat, dim=1).mean().item()
             
-            # 相关系数
-            pred_centered = pred_flat - pred_flat.mean(dim=1, keepdim=True)
-            target_centered = target_flat - target_flat.mean(dim=1, keepdim=True)
+            # 相关系数 (皮尔逊相关系数)
+            # 计算每个样本的相关系数，然后取平均
+            correlations = []
+            for i in range(pred_flat.shape[0]):
+                pred_sample = pred_flat[i]
+                target_sample = target_flat[i]
+                
+                # 计算皮尔逊相关系数
+                pred_mean = pred_sample.mean()
+                target_mean = target_sample.mean()
+                
+                pred_centered = pred_sample - pred_mean
+                target_centered = target_sample - target_mean
+                
+                numerator = (pred_centered * target_centered).sum()
+                denominator = torch.sqrt((pred_centered ** 2).sum() * (target_centered ** 2).sum())
+                
+                if denominator > 1e-8:  # 避免除零
+                    correlation_sample = numerator / denominator
+                else:
+                    correlation_sample = torch.tensor(0.0)
+                
+                correlations.append(correlation_sample.item())
             
-            correlation = (pred_centered * target_centered).sum(dim=1) / (
-                torch.sqrt((pred_centered ** 2).sum(dim=1)) * 
-                torch.sqrt((target_centered ** 2).sum(dim=1))
-            )
-            correlation = correlation.mean().item()
+            correlation = np.mean(correlations)
             
             return {
                 'noise_mse': mse,
