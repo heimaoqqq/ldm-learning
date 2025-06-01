@@ -258,9 +258,9 @@ class AttentionBlock(nn.Module):
         self.num_heads = num_heads
         self.use_checkpoint = use_checkpoint
         self.norm = normalization(channels)
-        self.qkv = conv_nd(2, channels, channels * 3, 1)
+        self.qkv = conv_nd(1, channels, channels * 3, 1)
         self.attention = QKVAttention(n_heads=num_heads)
-        self.proj_out = zero_module(conv_nd(2, channels, channels, 1))
+        self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
 
     def forward(self, x):
         return checkpoint(self._forward, (x,), self.parameters(), self.use_checkpoint)
