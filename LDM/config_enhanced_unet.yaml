@@ -11,7 +11,7 @@ vae:
   beta: 0.25
   vq_ema_decay: 0.99
   groups: 1
-  model_path: '/kaggle/input/vae-best-fid/adv_vqvae_best_fid.pth'
+  model_path: '../VAE/vae_ckpt/checkpoint_epoch_100.pth'
   freeze: true
 
 # 🚀 简化增强版U-Net - 包含真正的多层Transformer
@@ -47,8 +47,8 @@ inference:
   guidance_scale: 8.5       # 🚀 CFG强度
   eta: 0.3                  # 🚀 DDIM随机性参数
   
-  # 采样配置
-  sample_batch_size: 8
+  # 采样配置 - 🚀 资源优化
+  sample_batch_size: 16     # 🚀 从8增加到16（充分利用显存）
   num_samples_per_class: 10
   
   # 输出设置
@@ -58,22 +58,22 @@ inference:
 # 训练配置 - 针对Transformer优化
 training:
   epochs: 600  # 🎯 足够的训练轮数
-  lr: 0.0001   # 🚀 适合Transformer的学习率
+  lr: 0.00008   # 🚀 从0.0001轻微降低，适配batch size调整
   weight_decay: 0.02  # 🚀 正则化防止过拟合
-  warmup_steps: 5000  # 🎯 Transformer需要warmup
+  warmup_steps: 3000  # 🚀 从5000调整到3000，适配样本数
   
-  # 梯度累积 - 提高有效batch size
-  gradient_accumulation_steps: 4  # 🎯 有效batch_size = 6×4 = 24
+  # 梯度累积 - 🚀 针对4587样本优化
+  gradient_accumulation_steps: 3  # 🚀 调整为3，有效batch_size = 8×3 = 24
   
   # 早停策略
-  early_stopping_patience: 60  # 🚀 基于FID值早停
+  early_stopping_patience: 45  # 🚀 基于FID值早停
   early_stopping_metric: "fid"
   
   # 保存设置
   save_dir: "enhanced_models"
   save_interval: 50  # 🚀 频繁保存
-  sample_interval: 20  # 🚀 频繁生成样本监控
-  log_interval: 20
+  sample_interval: 15  # 🚀 频繁生成样本监控
+  log_interval: 15
   
   # 损失配置
   loss_type: "l2"
@@ -98,29 +98,36 @@ training:
 # FID评估配置 - 高精度评估
 fid_evaluation:
   enabled: true
-  eval_interval: 20        # 🚀 每20个epoch评估
-  num_samples: 2000         # 🚀 充足的评估样本
-  batch_size: 32
-  max_real_samples: 2000    # 🚀 充足的真实样本
+  eval_interval: 15        # 🚀 从20降到15，适配较小数据集
+  num_samples: 1500        # 🚀 从2000降到1500，适配验证集规模
+  batch_size: 64           # 🚀 保持64用于FID评估
+  max_real_samples: 510    # 🚀 使用全部验证集样本
   save_best_fid_model: true
+  
+  # 🚀 加速参数
+  eval_classes: 3          # 🚀 只评估3个随机类别
+  num_inference_steps: 50  # 🚀 评估时使用50步
+  parallel_generation: true  # 🚀 启用并行生成
 
-# 数据集配置
+# 数据集配置 - 🚀 针对样本数优化
 dataset:
   root_dir: '/kaggle/input/dataset'  # 🔧 正确的Kaggle数据集路径
-  batch_size: 6  # 🎯 小batch配合梯度累积
-  num_workers: 2
-  val_split: 0.1
+  batch_size: 8            # 🚀 针对4587样本优化，8×3累积=24有效batch
+  num_workers: 8           # 🚀 充分利用CPU
+  val_split: 0.1           # 🚀 10%验证集，适配当前数据划分
   shuffle_train: true
+  pin_memory: true         # 🚀 加速数据传输
+  persistent_workers: true # 🚀 保持worker进程
   
-  # 数据增强配置
+  # 🚫 数据增强已移除 - 对微多普勒时频图有害
+  # 原因：水平翻转、旋转、颜色抖动会破坏时频图的物理意义
+  # 时频图的时间轴和频率轴具有明确的物理含义，不应随意变换
   augmentation:
-    horizontal_flip: true
-    random_rotation: 15
-    color_jitter: 0.1
+    enabled: false  # 🚫 完全禁用数据增强
 
 # EMA配置
 use_ema: true
-ema_decay: 0.9999
+ema_decay: 0.99
 
 # 混合精度训练
 mixed_precision: false  # 🎯 追求质量，关闭混合精度
@@ -130,3 +137,27 @@ logging:
   log_dir: "enhanced_logs"
   tensorboard: false
   wandb: false 
+
+# 🚀 性能优化配置 - 保守优化保证训练质量
+performance:
+  # 显存优化
+  empty_cache_interval: 30  # 🚀 从50降到30，更频繁清理
+  
+  # CPU优化
+  torch_num_threads: 8      # 设置PyTorch线程数
+  
+  # 编译优化
+  compile_model: false      # 🚀 关闭编译，确保训练稳定性
+  
+  # 预取优化
+  prefetch_factor: 4        # 数据预取倍数
+
+# 🚀 训练质量监控
+quality_monitoring:
+  # 指标改进检测
+  improvement_threshold: 0.02  # FID改进阈值
+  loss_improvement_threshold: 0.001  # 损失改进阈值
+  
+  # 训练稳定性监控
+  gradient_norm_threshold: 10.0  # 梯度爆炸检测
+  loss_spike_threshold: 2.0      # 损失突增检测 
