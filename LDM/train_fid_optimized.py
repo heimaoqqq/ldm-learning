@@ -353,6 +353,7 @@ def train_fid_optimized():
                 batch_size = config['fid_evaluation'].get('batch_size', 20)
                 num_inference_steps = config['inference'].get('num_inference_steps', 250)
                 guidance_scale = config['inference'].get('guidance_scale', 12.0)
+                eta = config['inference'].get('eta', 0.3)
                 
                 fid_score = fid_evaluator.evaluate_model(
                     model, 
@@ -360,7 +361,8 @@ def train_fid_optimized():
                     batch_size=batch_size,
                     num_classes=config['unet']['num_classes'],
                     num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale
+                    guidance_scale=guidance_scale,
+                    eta=eta
                 )
                 
                 fid_time = time.time() - fid_start_time
