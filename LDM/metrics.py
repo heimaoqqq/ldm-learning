@@ -126,31 +126,25 @@ class NoiseMetrics:
             target_flat = target_noise.flatten(1)
             cosine_sim = F.cosine_similarity(pred_flat, target_flat, dim=1).mean().item()
             
-            # 相关系数 (皮尔逊相关系数)
-            # 计算每个样本的相关系数，然后取平均
-            correlations = []
-            for i in range(pred_flat.shape[0]):
-                pred_sample = pred_flat[i]
-                target_sample = target_flat[i]
-                
-                # 计算皮尔逊相关系数
-                pred_mean = pred_sample.mean()
-                target_mean = target_sample.mean()
-                
-                pred_centered = pred_sample - pred_mean
-                target_centered = target_sample - target_mean
-                
-                numerator = (pred_centered * target_centered).sum()
-                denominator = torch.sqrt((pred_centered ** 2).sum() * (target_centered ** 2).sum())
-                
-                if denominator > 1e-8:  # 避免除零
-                    correlation_sample = numerator / denominator
-                else:
-                    correlation_sample = torch.tensor(0.0)
-                
-                correlations.append(correlation_sample.item())
+            # 相关系数 (皮尔逊相关系数) - 重写版本
+            correlation_list = []
             
-            correlation = np.mean(correlations)
+            for i in range(pred_flat.shape[0]):
+                pred_vec = pred_flat[i].cpu().numpy()
+                target_vec = target_flat[i].cpu().numpy()
+                
+                # 使用numpy计算皮尔逊相关系数
+                if np.std(pred_vec) > 1e-8 and np.std(target_vec) > 1e-8:
+                    corr_matrix = np.corrcoef(pred_vec, target_vec)
+                    correlation_sample = corr_matrix[0, 1]
+                    if not np.isnan(correlation_sample):
+                        correlation_list.append(correlation_sample)
+                    else:
+                        correlation_list.append(0.0)
+                else:
+                    correlation_list.append(0.0)
+            
+            correlation = np.mean(correlation_list)
             
             return {
                 'noise_mse': mse,
