@@ -89,7 +89,7 @@ training:
   optimizer: "adamw"
   beta1: 0.9
   beta2: 0.999
-  eps: 1e-8
+  eps: 0.00000001
   
   # 梯度裁剪
   grad_clip_norm: 0.5  # 🎯 更严格的梯度裁剪
