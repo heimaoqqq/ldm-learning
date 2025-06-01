@@ -1,0 +1,132 @@
+# 增强版U-Net配置 - 完整Transformer实现
+# 目标：将FID降到20以内，使用真正的多层Transformer
+
+device: 'auto'  # 'cuda', 'cpu', or 'auto'
+
+# VAE配置 (预训练，冻结)
+vae:
+  in_channels: 3
+  latent_dim: 256
+  num_embeddings: 512
+  beta: 0.25
+  vq_ema_decay: 0.99
+  groups: 1
+  model_path: '../VAE/vae_ckpt/checkpoint_epoch_100.pth'
+  freeze: true
+
+# 🚀 简化增强版U-Net - 包含真正的多层Transformer
+unet:
+  type: 'simple_enhanced'    # 🚀 使用简化增强版 (115.8M参数)
+  in_channels: 256
+  out_channels: 256
+  model_channels: 192        # 显存友好的模型大小
+  num_classes: 31
+  time_embed_dim: 768        # 合理的嵌入维度
+  
+  # 🚀 真正的Transformer配置
+  transformer_depth: 2       # 每个注意力层2层Transformer
+  num_heads: 8               # 8个注意力头
+  use_attention_layers: [1, 2]  # 在第1层和第2层使用多层注意力
+  
+  # 说明：
+  # - 6个注意力层 × 2层Transformer = 12个Transformer块
+  # - 比简单版多50.3M参数，但增加了强大的空间注意力能力
+  # - 预期能显著改善FID值
+
+# 扩散过程配置
+diffusion:
+  timesteps: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  noise_schedule: 'linear'
+  scheduler_type: 'ddim'  # 🚀 使用改进的DDIM调度器
+
+# 推理配置 - 高质量采样
+inference:
+  num_inference_steps: 75   # 🚀 75步采样，平衡质量和速度
+  guidance_scale: 8.5       # 🚀 CFG强度
+  eta: 0.3                  # 🚀 DDIM随机性参数
+  
+  # 采样配置
+  sample_batch_size: 8
+  num_samples_per_class: 10
+  
+  # 输出设置
+  output_dir: "enhanced_samples"
+  save_format: "png"
+
+# 训练配置 - 针对Transformer优化
+training:
+  epochs: 600  # 🎯 足够的训练轮数
+  lr: 0.0001   # 🚀 适合Transformer的学习率
+  weight_decay: 0.02  # 🚀 正则化防止过拟合
+  warmup_steps: 5000  # 🎯 Transformer需要warmup
+  
+  # 梯度累积 - 提高有效batch size
+  gradient_accumulation_steps: 4  # 🎯 有效batch_size = 6×4 = 24
+  
+  # 早停策略
+  early_stopping_patience: 60  # 🚀 基于FID值早停
+  early_stopping_metric: "fid"
+  
+  # 保存设置
+  save_dir: "enhanced_models"
+  save_interval: 50  # 🚀 频繁保存
+  sample_interval: 20  # 🚀 频繁生成样本监控
+  log_interval: 20
+  
+  # 损失配置
+  loss_type: "l2"
+  
+  # Classifier-Free Guidance
+  use_cfg: true
+  cfg_dropout_prob: 0.15
+  
+  # 优化器配置
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.999
+  eps: 0.00000001
+  
+  # 梯度裁剪
+  grad_clip_norm: 0.5
+  
+  # 调度器
+  use_scheduler: true
+  scheduler_type: "cosine"
+
+# FID评估配置 - 高精度评估
+fid_evaluation:
+  enabled: true
+  eval_interval: 20        # 🚀 每20个epoch评估
+  num_samples: 2000         # 🚀 充足的评估样本
+  batch_size: 32
+  max_real_samples: 2000    # 🚀 充足的真实样本
+  save_best_fid_model: true
+
+# 数据集配置
+dataset:
+  root_dir: '/kaggle/input/cell-classification-data/CellData/PCam'
+  batch_size: 6  # 🎯 小batch配合梯度累积
+  num_workers: 2
+  val_split: 0.1
+  shuffle_train: true
+  
+  # 数据增强配置
+  augmentation:
+    horizontal_flip: true
+    random_rotation: 15
+    color_jitter: 0.1
+
+# EMA配置
+use_ema: true
+ema_decay: 0.9999
+
+# 混合精度训练
+mixed_precision: false  # 🎯 追求质量，关闭混合精度
+
+# 日志配置
+logging:
+  log_dir: "enhanced_logs"
+  tensorboard: false
+  wandb: false 
