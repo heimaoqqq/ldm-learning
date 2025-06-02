@@ -15,7 +15,7 @@ from PIL import Image
 import yaml
 
 # 添加VAE路径
-sys.path.append('../VAE')
+sys.path.append('/kaggle/input/vae-best-fid/adv_vqvae_best_fid.pth')
 
 from vae_ldm import create_vae_ldm
 from fid_evaluation import FIDEvaluator
