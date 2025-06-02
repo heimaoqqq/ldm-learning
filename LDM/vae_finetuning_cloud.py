@@ -55,9 +55,19 @@ from sklearn.model_selection import train_test_split
 
 # 添加混合精度训练支持
 try:
-    from torch.cuda.amp import autocast, GradScaler
-    MIXED_PRECISION_AVAILABLE = True
-    print("✅ 混合精度训练可用")
+    import torch
+    # 检查PyTorch版本并使用正确的autocast
+    if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast'):
+        from torch.amp import autocast
+        from torch.cuda.amp import GradScaler
+        AUTOCAST_DEVICE = 'cuda'
+        MIXED_PRECISION_AVAILABLE = True
+        print("✅ 新版混合精度训练可用")
+    else:
+        from torch.cuda.amp import autocast, GradScaler
+        AUTOCAST_DEVICE = None
+        MIXED_PRECISION_AVAILABLE = True
+        print("✅ 传统混合精度训练可用")
 except ImportError:
     MIXED_PRECISION_AVAILABLE = False
     print("⚠️  混合精度训练不可用")
@@ -191,6 +201,7 @@ class CloudVAEFineTuner:
             'eval_every_epochs': 2,  # 每2个epoch评估一次
             'use_gradient_checkpointing': True,  # 启用梯度检查点
             'mixed_precision': MIXED_PRECISION_AVAILABLE,  # 混合精度训练
+            'safe_mixed_precision': True,  # 安全模式：遇到问题时自动禁用混合精度
         }
         
         os.makedirs(self.config['save_dir'], exist_ok=True)
@@ -324,6 +335,10 @@ class CloudVAEFineTuner:
     
     def vae_loss(self, images):
         """VAE损失函数"""
+        # 确保输入图像为正确的数据类型
+        if images.dtype != torch.float32 and not self.config.get('mixed_precision', False):
+            images = images.float()
+        
         # 编码
         posterior = self.vae.encode(images).latent_dist
         latents = posterior.sample()
@@ -331,14 +346,18 @@ class CloudVAEFineTuner:
         # 解码
         reconstructed = self.vae.decode(latents).sample
         
-        # 重建损失
-        recon_loss = self.mse_loss(reconstructed, images)
+        # 重建损失 - 确保数据类型匹配
+        recon_loss = self.mse_loss(reconstructed.float(), images.float())
         
         # KL散度损失
         kl_loss = posterior.kl().mean()
         
-        # 感知损失
-        perceptual_loss = self.compute_perceptual_loss(images, reconstructed)
+        # 感知损失 - 在autocast外计算以避免数据类型问题
+        if self.config.get('mixed_precision', False):
+            with torch.cuda.amp.autocast(enabled=False):
+                perceptual_loss = self.compute_perceptual_loss(images.float(), reconstructed.float())
+        else:
+            perceptual_loss = self.compute_perceptual_loss(images, reconstructed)
         
         # 总损失
         total_loss = (
@@ -384,9 +403,16 @@ class CloudVAEFineTuner:
             
             # 混合精度训练
             if self.config['mixed_precision']:
-                with autocast():
-                    loss_dict = self.vae_loss(images)
-                    loss = loss_dict['total_loss'] / self.config['gradient_accumulation_steps']
+                if AUTOCAST_DEVICE:
+                    # 新版PyTorch
+                    with autocast(AUTOCAST_DEVICE, dtype=torch.float16):
+                        loss_dict = self.vae_loss(images)
+                        loss = loss_dict['total_loss'] / self.config['gradient_accumulation_steps']
+                else:
+                    # 传统版本
+                    with autocast():
+                        loss_dict = self.vae_loss(images)
+                        loss = loss_dict['total_loss'] / self.config['gradient_accumulation_steps']
                 
                 # 缩放损失并反向传播
                 self.scaler.scale(loss).backward()
@@ -516,10 +542,18 @@ class CloudVAEFineTuner:
             
             # VAE重建
             if self.config['mixed_precision']:
-                with autocast():
-                    posterior = self.vae.encode(images).latent_dist
-                    latents = posterior.sample()
-                    reconstructed = self.vae.decode(latents).sample
+                if AUTOCAST_DEVICE:
+                    # 新版PyTorch
+                    with autocast(AUTOCAST_DEVICE, dtype=torch.float16):
+                        posterior = self.vae.encode(images).latent_dist
+                        latents = posterior.sample()
+                        reconstructed = self.vae.decode(latents).sample
+                else:
+                    # 传统版本
+                    with autocast():
+                        posterior = self.vae.encode(images).latent_dist
+                        latents = posterior.sample()
+                        reconstructed = self.vae.decode(latents).sample
             else:
                 posterior = self.vae.encode(images).latent_dist
                 latents = posterior.sample()
@@ -823,6 +857,42 @@ def main():
                 print("   1. 重启内核清理所有内存")
                 print("   2. 手动设置batch_size=2")
                 print("   3. 使用CPU训练（非常慢）")
+                return None
+        elif "Unsupported dtype" in str(e) or "dtype" in str(e).lower():
+            print(f"❌ 数据类型错误: {e}")
+            print("🔄 禁用混合精度训练重试...")
+            
+            # 清理内存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+            
+            try:
+                # 创建禁用混合精度的fine-tuner
+                print("📦 创建FP32精度训练器...")
+                
+                class SafeCloudVAEFineTuner(CloudVAEFineTuner):
+                    def __init__(self, data_dir):
+                        # 临时禁用混合精度
+                        global MIXED_PRECISION_AVAILABLE
+                        original_mp = MIXED_PRECISION_AVAILABLE
+                        MIXED_PRECISION_AVAILABLE = False
+                        
+                        super().__init__(data_dir)
+                        self.config['mixed_precision'] = False
+                        print("✅ FP32精度训练器创建完成")
+                        
+                        # 恢复原始设置
+                        MIXED_PRECISION_AVAILABLE = original_mp
+                
+                safe_finetuner = SafeCloudVAEFineTuner(data_dir)
+                best_loss = safe_finetuner.finetune()
+                
+                print(f"\n🎯 FP32模式VAE Fine-tuning完成，最佳重建损失: {best_loss:.4f}")
+                return best_loss
+                
+            except Exception as safe_e:
+                print(f"❌ FP32模式也失败了: {safe_e}")
                 return None
         else:
             print(f"❌ 运行时错误: {e}")
