@@ -426,9 +426,12 @@ def create_vae_ldm(
         'rescale_timesteps': True,
     }
     
-    # <<<< 新增：定义计算出的缩放因子 >>>>
-    calculated_latent_scale_factor = 0.0616 # 基于之前的统计数据
-    # <<<< 结束新增 >>>>
+    # <<<< 修改：根据训练中的观察调整缩放因子 >>>>
+    # 原始计算 (基于单批次): 0.0616 (来自 1/16.2432)
+    # 训练中观察到的 scaled_std ≈ 0.54 时，表示 actual_raw_std ≈ 0.54 / 0.0616 ≈ 8.77
+    # 新的缩放因子 = 1 / actual_raw_std = 1 / 8.77 ≈ 0.1140
+    calculated_latent_scale_factor = 0.114 
+    # <<<< 结束修改 >>>>
 
     model = VAELatentDiffusionModel(
         vae_config=vae_config,
@@ -436,7 +439,7 @@ def create_vae_ldm(
         diffusion_config=diffusion_config,
         vae_checkpoint_path=vae_checkpoint_path,
         device=device,
-        latent_scale_factor=calculated_latent_scale_factor # <--- 传递缩放因子
+        latent_scale_factor=calculated_latent_scale_factor # <--- 传递更新后的缩放因子
     )
     
     return model 
