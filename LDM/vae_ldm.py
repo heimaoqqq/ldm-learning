@@ -54,6 +54,10 @@ class VAELatentDiffusionModel(nn.Module):
         self.vae_scale_factor = vae_scale_factor
         self.latent_scale_factor = latent_scale_factor
         
+        # 新增：用于控制epoch级别调试打印的属性
+        self._last_printed_epoch_debug = -1
+        self._prints_this_epoch_debug = 0
+        
         print(f"✅ VAE-LDM 初始化完成")
         print(f"   VAE潜在维度: {self.vae_latent_dim}")
         print(f"   U-Net类别数: {self.unet.num_classes}")
@@ -181,13 +185,14 @@ class VAELatentDiffusionModel(nn.Module):
         decoded = self.vae.decode(latents)
         return decoded
     
-    def forward(self, images: torch.Tensor, class_labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+    def forward(self, images: torch.Tensor, class_labels: Optional[torch.Tensor] = None, current_epoch: Optional[int] = None) -> Dict[str, torch.Tensor]:
         """
         训练前向传播
         
         Args:
             images: [B, 3, H, W] 输入图像
             class_labels: [B] 类别标签
+            current_epoch: 当前训练的epoch号（用于控制调试打印）
             
         Returns:
             loss_dict: 包含各种损失的字典
@@ -196,12 +201,16 @@ class VAELatentDiffusionModel(nn.Module):
         with torch.no_grad():
             latents = self.encode_to_latent(images)
         
-        # <--- 在这里添加调试打印 --->
-        if not hasattr(self, '_debug_print_count_forward'):
-            self._debug_print_count_forward = 0
-        if self._debug_print_count_forward < 5: # 只打印几次避免刷屏
-            print(f"Debug (VAELatentDiffusionModel.forward): Latents fed to U-Net - Mean: {latents.mean().item():.4f}, Std: {latents.std().item():.4f}, Min: {latents.min().item():.4f}, Max: {latents.max().item():.4f}")
-            self._debug_print_count_forward += 1
+        # <--- 修改后的调试打印逻辑 --->
+        if current_epoch is not None and current_epoch < 10: # 检查是否在前10个epoch
+            if self._last_printed_epoch_debug != current_epoch: # 如果是新的epoch（在前10个中）
+                self._last_printed_epoch_debug = current_epoch
+                self._prints_this_epoch_debug = 0 # 重置当前epoch的打印计数器
+            
+            if self._prints_this_epoch_debug < 5: # 打印当前epoch的前5个批次
+                # 使用 current_epoch + 1 使其从1开始计数epoch，_prints_this_epoch_debug 从0开始，所以也+1
+                print(f"Debug (Epoch {current_epoch + 1}, Batch In Epoch {self._prints_this_epoch_debug + 1}): Latents fed to U-Net - Mean: {latents.mean().item():.4f}, Std: {latents.std().item():.4f}, Min: {latents.min().item():.4f}, Max: {latents.max().item():.4f}")
+                self._prints_this_epoch_debug += 1
         # <--- 调试打印结束 --->
         
         # 2. 随机采样时间步
