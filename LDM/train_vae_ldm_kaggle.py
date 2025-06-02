@@ -184,15 +184,8 @@ class VAELDMTrainer:
     
     def save_checkpoint(self, is_best: bool = False):
         """保存检查点"""
-        checkpoint_path = os.path.join(self.save_dir, f'checkpoint_epoch_{self.current_epoch}.pt')
-        
-        self.model.save_checkpoint(
-            filepath=checkpoint_path,
-            epoch=self.current_epoch,
-            optimizer_state=self.optimizer.state_dict()
-        )
-        
         if is_best:
+            # 最佳模型：始终保存为best_model.pt
             best_path = os.path.join(self.save_dir, 'best_model.pt')
             self.model.save_checkpoint(
                 filepath=best_path,
@@ -200,6 +193,15 @@ class VAELDMTrainer:
                 optimizer_state=self.optimizer.state_dict()
             )
             print(f"💾 最佳模型已保存: {best_path}")
+        else:
+            # 定期检查点：覆盖latest_checkpoint.pt
+            checkpoint_path = os.path.join(self.save_dir, 'latest_checkpoint.pt')
+            self.model.save_checkpoint(
+                filepath=checkpoint_path,
+                epoch=self.current_epoch,
+                optimizer_state=self.optimizer.state_dict()
+            )
+            print(f"💾 定期检查点已保存: {checkpoint_path} (epoch {self.current_epoch + 1})")
     
     def train(self):
         """主训练循环"""
@@ -234,10 +236,10 @@ class VAELDMTrainer:
                 if is_best:
                     self.save_checkpoint(is_best=True)
             
-            # 定期保存检查点
+            # 定期保存检查点 - 添加调试输出
             if (epoch + 1) % self.save_interval_epochs == 0:
+                print(f"🔍 触发定期保存: epoch {epoch+1}, save_interval_epochs={self.save_interval_epochs}")
                 self.save_checkpoint(is_best=False)
-                print(f"💾 检查点已保存: epoch {epoch+1}")
         
         print("🎉 训练完成!")
         print(f"🏆 最佳FID: {self.best_fid:.2f}")
