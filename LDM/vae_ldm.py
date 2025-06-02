@@ -403,7 +403,8 @@ def create_vae_ldm(
         'latent_dim': 256,
         'num_embeddings': 512,
         'beta': 0.25,
-        'groups': 1,
+        'decay': 0.99,  # 添加缺失的decay参数
+        'groups': 32,   # 修正：从1改为32，与VAE训练配置匹配
     }
     
     # U-Net配置
