@@ -276,7 +276,7 @@ class VAELDMTrainer:
         print(f"🏆 最佳FID: {self.best_fid:.2f}")
         print(f"🎯 最佳验证损失: {self.best_val_loss:.4f}")
 
-def load_config(config_path: str = "config_kaggle.yaml") -> Dict[str, Any]:
+def load_config(config_path: str = "config_optimized.yaml") -> Dict[str, Any]:
     """加载YAML配置文件"""
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
