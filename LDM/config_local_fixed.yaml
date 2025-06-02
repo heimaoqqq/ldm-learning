@@ -1,0 +1,75 @@
+# VAE-LDM 本地修复配置
+# 🎯 使用正确的本地数据集路径
+
+# ================== 📁 路径配置 ==================
+paths:
+  vae_checkpoint: '/kaggle/input/vae-best-fid/adv_vqvae_best_fid.pth'  # VAE权重路径
+  data_dir: '/kaggle/input/dataset'                                   # 🔧 正确的数据集路径！
+  save_dir: './checkpoints'                                    # 本地保存路径
+
+# ================== 🎛️ 模型配置 ==================
+model:
+  num_classes: 31
+  image_size: 32              
+  diffusion_steps: 1000       
+  noise_schedule: "cosine"    
+
+# ================== 🏃 训练配置 - FID优化 ==================
+training:   
+  # 本地优化参数
+  batch_size: 4                    # 本地GPU适中batch size
+  gradient_accumulation_steps: 6   # 有效batch = 4×6 = 24
+  learning_rate: 0.0001           
+  weight_decay: 0.01               
+  max_epochs: 100                  # 本地测试用较少轮数
+  
+  # 频繁评估以监控FID变化
+  log_interval: 5                  
+  save_interval_epochs: 10         
+  eval_interval: 10                # 每10轮评估FID
+  
+  # 本地优化
+  enable_wandb: false
+  num_workers: 0                   # 避免多进程问题
+
+# ================== 📊 FID优化关键配置 ==================
+evaluation:
+  # 🔧 关键修复：适中的样本数量
+  eval_classes: 5                  # 评估5个类别
+  samples_per_class: 50            # 每类50个样本
+  ddim_steps: 75                   # 75步采样（平衡质量和速度）
+  eta: 0.0                         # 确定性采样
+  max_real_samples: 500            # 500个真实样本用于基线
+  
+  # 批量优化
+  generation_batch_size: 8         
+  
+# ================== 🎮 GPU优化配置 ==================
+gpu:
+  device: 'cuda'
+  mixed_precision: false
+  gradient_clip: 1.0
+
+# ================== 🎨 关键采样配置修复 ==================
+sampling:
+  guidance_scale: 2.5              # 🔧 启用适度CFG引导
+  use_ddim: true
+  num_inference_steps: 75          # 🔧 增加推理步数
+  
+  # 高质量采样设置
+  clip_denoised: true
+  progress: true
+
+# ================== 📝 实验记录 ==================
+experiment:
+  name: "VAE-LDM-Local-Fixed"
+  description: "本地FID修复版：使用正确数据集路径"
+  version: "v4.0"
+  target_fid: 80.0                 # 本地测试目标FID
+
+# ================== 🔧 调试配置 ==================
+debug:
+  verbose: true
+  save_samples: true
+  save_interval_samples: 5         # 每5轮保存样本
+  profile: false 
