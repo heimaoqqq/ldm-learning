@@ -202,17 +202,25 @@ class VAELatentDiffusionModel(nn.Module):
         with torch.no_grad():
             latents = self.encode_to_latent(images)
         
-        # <--- 注释掉调试打印逻辑，使日志更简洁 --->
-        # if current_epoch is not None and current_epoch < 10: # 检查是否在前10个epoch
-        #     if self._last_printed_epoch_debug != current_epoch: # 如果是新的epoch（在前10个中）
-        #         self._last_printed_epoch_debug = current_epoch
-        #         self._prints_this_epoch_debug = 0 # 重置当前epoch的打印计数器
-        #     
-        #     if self._prints_this_epoch_debug < 5: # 打印当前epoch的前5个批次
-        #         # 使用 current_epoch + 1 使其从1开始计数epoch，_prints_this_epoch_debug 从0开始，所以也+1
-        #         print(f"Debug (Epoch {current_epoch + 1}, Batch In Epoch {self._prints_this_epoch_debug + 1}): Latents fed to U-Net - Mean: {latents.mean().item():.4f}, Std: {latents.std().item():.4f}, Min: {latents.min().item():.4f}, Max: {latents.max().item():.4f}")
-        #         self._prints_this_epoch_debug += 1
-        # <--- 调试打印结束 --->
+        # 调试输出：前10个epoch显示潜在表示统计信息
+        if current_epoch is not None and current_epoch < 10:
+            if not hasattr(self, '_debug_batch_count'):
+                self._debug_batch_count = {}
+            
+            if current_epoch not in self._debug_batch_count:
+                self._debug_batch_count[current_epoch] = 0
+            
+            if self._debug_batch_count[current_epoch] < 3:  # 每个epoch只显示前3个batch
+                raw_mean = latents.mean().item() / self.latent_scale_factor
+                raw_std = latents.std().item() / self.latent_scale_factor
+                
+                print(f"📊 Epoch {current_epoch+1} Batch {self._debug_batch_count[current_epoch]+1}:")
+                print(f"   缩放因子: {self.latent_scale_factor:.4f}")
+                print(f"   原始潜在表示: 均值={raw_mean:.4f}, 标准差={raw_std:.4f}")
+                print(f"   缩放后潜在表示: 均值={latents.mean().item():.4f}, 标准差={latents.std().item():.4f}")
+                print(f"   潜在表示范围: [{latents.min().item():.4f}, {latents.max().item():.4f}]")
+                
+                self._debug_batch_count[current_epoch] += 1
         
         # 2. 随机采样时间步
         batch_size = latents.shape[0]
