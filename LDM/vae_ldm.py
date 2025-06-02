@@ -54,9 +54,10 @@ class VAELatentDiffusionModel(nn.Module):
         self.vae_scale_factor = vae_scale_factor
         self.latent_scale_factor = latent_scale_factor
         
+        # 注释掉调试相关变量，因为调试打印已被注释
         # 新增：用于控制epoch级别调试打印的属性
-        self._last_printed_epoch_debug = -1
-        self._prints_this_epoch_debug = 0
+        # self._last_printed_epoch_debug = -1
+        # self._prints_this_epoch_debug = 0
         
         print(f"✅ VAE-LDM 初始化完成")
         print(f"   VAE潜在维度: {self.vae_latent_dim}")
@@ -201,16 +202,16 @@ class VAELatentDiffusionModel(nn.Module):
         with torch.no_grad():
             latents = self.encode_to_latent(images)
         
-        # <--- 修改后的调试打印逻辑 --->
-        if current_epoch is not None and current_epoch < 10: # 检查是否在前10个epoch
-            if self._last_printed_epoch_debug != current_epoch: # 如果是新的epoch（在前10个中）
-                self._last_printed_epoch_debug = current_epoch
-                self._prints_this_epoch_debug = 0 # 重置当前epoch的打印计数器
-            
-            if self._prints_this_epoch_debug < 5: # 打印当前epoch的前5个批次
-                # 使用 current_epoch + 1 使其从1开始计数epoch，_prints_this_epoch_debug 从0开始，所以也+1
-                print(f"Debug (Epoch {current_epoch + 1}, Batch In Epoch {self._prints_this_epoch_debug + 1}): Latents fed to U-Net - Mean: {latents.mean().item():.4f}, Std: {latents.std().item():.4f}, Min: {latents.min().item():.4f}, Max: {latents.max().item():.4f}")
-                self._prints_this_epoch_debug += 1
+        # <--- 注释掉调试打印逻辑，使日志更简洁 --->
+        # if current_epoch is not None and current_epoch < 10: # 检查是否在前10个epoch
+        #     if self._last_printed_epoch_debug != current_epoch: # 如果是新的epoch（在前10个中）
+        #         self._last_printed_epoch_debug = current_epoch
+        #         self._prints_this_epoch_debug = 0 # 重置当前epoch的打印计数器
+        #     
+        #     if self._prints_this_epoch_debug < 5: # 打印当前epoch的前5个批次
+        #         # 使用 current_epoch + 1 使其从1开始计数epoch，_prints_this_epoch_debug 从0开始，所以也+1
+        #         print(f"Debug (Epoch {current_epoch + 1}, Batch In Epoch {self._prints_this_epoch_debug + 1}): Latents fed to U-Net - Mean: {latents.mean().item():.4f}, Std: {latents.std().item():.4f}, Min: {latents.min().item():.4f}, Max: {latents.max().item():.4f}")
+        #         self._prints_this_epoch_debug += 1
         # <--- 调试打印结束 --->
         
         # 2. 随机采样时间步
