@@ -19,6 +19,8 @@ print(f"📂 当前工作目录: {os.getcwd()}")
 
 # 内存优化设置
 torch.backends.cudnn.benchmark = True
+# 添加内存分配优化
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 if torch.cuda.is_available():
     torch.cuda.empty_cache()
     print(f"🚀 CUDA设备: {torch.cuda.get_device_name()}")
@@ -51,6 +53,15 @@ from PIL import Image
 import glob
 from sklearn.model_selection import train_test_split
 
+# 添加混合精度训练支持
+try:
+    from torch.cuda.amp import autocast, GradScaler
+    MIXED_PRECISION_AVAILABLE = True
+    print("✅ 混合精度训练可用")
+except ImportError:
+    MIXED_PRECISION_AVAILABLE = False
+    print("⚠️  混合精度训练不可用")
+
 class CloudGaitDataset(Dataset):
     """云环境数据集类"""
     
@@ -75,8 +86,8 @@ class CloudGaitDataset(Dataset):
         
         return image, label
 
-def build_cloud_dataloader(root_dir, batch_size=8, num_workers=2, val_split=0.3):
-    """云环境数据加载器"""
+def build_cloud_dataloader(root_dir, batch_size=8, num_workers=0, val_split=0.3):
+    """内存优化的云环境数据加载器"""
     print(f"🔍 扫描云数据集目录: {root_dir}")
     
     transform = transforms.Compose([
@@ -150,9 +161,9 @@ def build_cloud_dataloader(root_dir, batch_size=8, num_workers=2, val_split=0.3)
     val_dataset = CloudGaitDataset(val_paths, val_ids, transform=transform)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
-                             num_workers=num_workers, pin_memory=True)
+                             num_workers=num_workers, pin_memory=True if torch.cuda.is_available() else False)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, 
-                           num_workers=num_workers, pin_memory=True)
+                           num_workers=num_workers, pin_memory=True if torch.cuda.is_available() else False)
     
     return train_loader, val_loader, len(train_dataset), len(val_dataset)
 
@@ -163,9 +174,10 @@ class CloudVAEFineTuner:
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"🚀 云VAE Fine-tuning 设备: {self.device}")
         
-        # 云环境优化配置
+        # 内存优化配置
         self.config = {
-            'batch_size': 16,  # 云环境可以用更大批次
+            'batch_size': 8,  # 减小batch size以节省显存
+            'gradient_accumulation_steps': 2,  # 使用梯度累积保持有效batch size
             'learning_rate': 1e-5,  # 较小学习率保护预训练权重
             'weight_decay': 0.01,
             'max_epochs': 25,  # 完整训练
@@ -173,23 +185,27 @@ class CloudVAEFineTuner:
             'save_dir': './vae_finetuned',
             'reconstruction_weight': 1.0,
             'kl_weight': 0.1,  # 降低KL权重，关注重建质量
-            'perceptual_weight': 0.3,  # 适中的感知损失权重
+            'perceptual_weight': 0.3,  # 恢复合理的感知损失权重
+            'use_perceptual_loss': True,  # 保持感知损失开启
             'save_every_epochs': 5,  # 每5个epoch保存一次
             'eval_every_epochs': 2,  # 每2个epoch评估一次
+            'use_gradient_checkpointing': True,  # 启用梯度检查点
+            'mixed_precision': MIXED_PRECISION_AVAILABLE,  # 混合精度训练
         }
         
         os.makedirs(self.config['save_dir'], exist_ok=True)
         
-        # 1. 创建数据加载器
+        # 1. 创建数据加载器 - 减少num_workers
         print("📁 加载云数据集...")
         self.train_loader, self.val_loader, train_size, val_size = build_cloud_dataloader(
             root_dir=self.config['data_dir'],
             batch_size=self.config['batch_size'],
-            num_workers=2,
+            num_workers=0,  # 减少workers以节省内存
             val_split=0.3
         )
         print(f"   训练集: {len(self.train_loader)} batches ({train_size} samples)")
         print(f"   验证集: {len(self.val_loader)} batches ({val_size} samples)")
+        print(f"   有效batch size: {self.config['batch_size'] * self.config['gradient_accumulation_steps']}")
         
         # 2. 加载预训练VAE
         print("📦 加载预训练AutoencoderKL...")
@@ -197,6 +213,12 @@ class CloudVAEFineTuner:
             "runwayml/stable-diffusion-v1-5", 
             subfolder="vae"
         ).to(self.device)
+        
+        # 启用梯度检查点
+        if self.config['use_gradient_checkpointing']:
+            if hasattr(self.vae, 'enable_gradient_checkpointing'):
+                self.vae.enable_gradient_checkpointing()
+                print("✅ VAE梯度检查点已启用")
         
         # 解冻VAE参数用于fine-tuning
         for param in self.vae.parameters():
@@ -211,6 +233,11 @@ class CloudVAEFineTuner:
         self.mse_loss = nn.MSELoss()
         self.setup_perceptual_loss()
         
+        # 5. 混合精度训练
+        if self.config['mixed_precision']:
+            self.scaler = GradScaler()
+            print("✅ 混合精度训练已启用")
+        
         # 记录训练历史
         self.train_history = {
             'epoch': [],
@@ -220,6 +247,9 @@ class CloudVAEFineTuner:
             'perceptual_loss': [],
             'val_mse': []
         }
+        
+        # 清理初始化后的内存
+        self.clear_memory()
         
         print("✅ 云VAE Fine-tuning器初始化完成!")
     
@@ -256,20 +286,26 @@ class CloudVAEFineTuner:
         )
     
     def setup_perceptual_loss(self):
-        """设置感知损失"""
+        """设置完整感知损失"""
+        if not self.config['use_perceptual_loss']:
+            print("🚫 感知损失已关闭以节省内存")
+            self.perceptual_net = None
+            return
+            
         try:
             from torchvision.models import vgg16, VGG16_Weights
+            # 使用完整的VGG16特征层，保持感知损失质量
             self.perceptual_net = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features[:16].to(self.device)
             for param in self.perceptual_net.parameters():
                 param.requires_grad = False
             self.perceptual_net.eval()
-            print("✅ VGG16感知损失已设置")
+            print("✅ 完整VGG16感知损失已设置")
         except:
             print("⚠️  VGG16不可用，跳过感知损失")
             self.perceptual_net = None
     
     def compute_perceptual_loss(self, real, fake):
-        """计算感知损失"""
+        """计算完整感知损失"""
         if self.perceptual_net is None:
             return torch.tensor(0.0, device=self.device)
         
@@ -279,7 +315,9 @@ class CloudVAEFineTuner:
         if fake.size(1) == 1:
             fake = fake.repeat(1, 3, 1, 1)
         
-        real_features = self.perceptual_net(real)
+        # 计算VGG特征，真实图像用no_grad优化内存
+        with torch.no_grad():
+            real_features = self.perceptual_net(real)
         fake_features = self.perceptual_net(fake)
         
         return F.mse_loss(real_features, fake_features)
@@ -319,13 +357,14 @@ class CloudVAEFineTuner:
         }
     
     def clear_memory(self):
-        """清理CUDA内存"""
+        """增强内存清理"""
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            gc.collect()
+            torch.cuda.synchronize()
+        gc.collect()
     
     def train_epoch(self, epoch: int):
-        """训练一个epoch"""
+        """内存优化的训练epoch"""
         self.vae.train()
         
         total_loss = 0
@@ -334,27 +373,50 @@ class CloudVAEFineTuner:
         total_perceptual = 0
         num_batches = 0
         
+        # 重置梯度累积
+        self.optimizer.zero_grad()
+        
         pbar = tqdm(self.train_loader, desc=f"Fine-tune Epoch {epoch+1}")
         
         for batch_idx, batch in enumerate(pbar):
             images, _ = batch  # 忽略标签
-            images = images.to(self.device)
+            images = images.to(self.device, non_blocking=True)
             
-            # 前向传播
-            loss_dict = self.vae_loss(images)
-            loss = loss_dict['total_loss']
+            # 混合精度训练
+            if self.config['mixed_precision']:
+                with autocast():
+                    loss_dict = self.vae_loss(images)
+                    loss = loss_dict['total_loss'] / self.config['gradient_accumulation_steps']
+                
+                # 缩放损失并反向传播
+                self.scaler.scale(loss).backward()
+            else:
+                # 前向传播
+                loss_dict = self.vae_loss(images)
+                loss = loss_dict['total_loss'] / self.config['gradient_accumulation_steps']
+                
+                # 反向传播
+                loss.backward()
             
-            # 反向传播
-            self.optimizer.zero_grad()
-            loss.backward()
+            # 梯度累积
+            if (batch_idx + 1) % self.config['gradient_accumulation_steps'] == 0:
+                if self.config['mixed_precision']:
+                    # 梯度裁剪
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
+                    
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    # 梯度裁剪
+                    torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
+                    self.optimizer.step()
+                
+                self.optimizer.zero_grad()
             
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
-            
-            self.optimizer.step()
-            
-            # 记录损失
-            total_loss += loss.item()
+            # 记录损失（恢复到原始scale）
+            actual_loss = loss.item() * self.config['gradient_accumulation_steps']
+            total_loss += actual_loss
             total_recon += loss_dict['recon_loss'].item()
             total_kl += loss_dict['kl_loss'].item()
             total_perceptual += loss_dict['perceptual_loss'].item()
@@ -362,7 +424,7 @@ class CloudVAEFineTuner:
             
             # 更新进度条
             pbar.set_postfix({
-                'Loss': f'{loss.item():.4f}',
+                'Loss': f'{actual_loss:.4f}',
                 'Recon': f'{loss_dict["recon_loss"].item():.4f}',
                 'KL': f'{loss_dict["kl_loss"].item():.4f}',
                 'Perc': f'{loss_dict["perceptual_loss"].item():.4f}'
@@ -374,9 +436,22 @@ class CloudVAEFineTuner:
                     images, loss_dict['reconstructed'], epoch
                 )
             
-            # 定期清理内存
-            if batch_idx % 50 == 0:
+            # 更频繁的内存清理
+            if batch_idx % 20 == 0:  # 每20个batch清理一次
+                del images, loss_dict, loss
                 self.clear_memory()
+        
+        # 处理最后不完整的梯度累积
+        if (len(self.train_loader)) % self.config['gradient_accumulation_steps'] != 0:
+            if self.config['mixed_precision']:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
+                self.optimizer.step()
+            self.optimizer.zero_grad()
         
         # 更新学习率
         self.scheduler.step()
@@ -422,21 +497,33 @@ class CloudVAEFineTuner:
     
     @torch.no_grad()
     def evaluate_reconstruction_quality(self, val_loader):
-        """评估重建质量"""
+        """内存优化的评估函数"""
         self.vae.eval()
         
         total_mse = 0
         total_samples = 0
         latent_stats = []
         
-        for batch in val_loader:
+        # 限制评估样本数量
+        max_eval_batches = min(20, len(val_loader))
+        
+        for batch_idx, batch in enumerate(val_loader):
+            if batch_idx >= max_eval_batches:
+                break
+                
             images, _ = batch
-            images = images.to(self.device)
+            images = images.to(self.device, non_blocking=True)
             
             # VAE重建
-            posterior = self.vae.encode(images).latent_dist
-            latents = posterior.sample()
-            reconstructed = self.vae.decode(latents).sample
+            if self.config['mixed_precision']:
+                with autocast():
+                    posterior = self.vae.encode(images).latent_dist
+                    latents = posterior.sample()
+                    reconstructed = self.vae.decode(latents).sample
+            else:
+                posterior = self.vae.encode(images).latent_dist
+                latents = posterior.sample()
+                reconstructed = self.vae.decode(latents).sample
             
             # 计算MSE
             mse = F.mse_loss(reconstructed, images, reduction='sum')
@@ -450,6 +537,12 @@ class CloudVAEFineTuner:
                 'min': latents.min().item(),
                 'max': latents.max().item()
             })
+            
+            # 清理内存
+            del images, posterior, latents, reconstructed, mse
+            
+            if batch_idx % 5 == 0:
+                self.clear_memory()
         
         avg_mse = total_mse / total_samples
         
@@ -587,9 +680,105 @@ class CloudVAEFineTuner:
         
         return best_recon_loss
 
+def create_emergency_low_memory_finetuner(data_dir):
+    """创建极低内存配置的Fine-tuner"""
+    print("🆘 启动应急低内存模式...")
+    
+    class EmergencyCloudVAEFineTuner(CloudVAEFineTuner):
+        def __init__(self, data_dir):
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            print(f"🚀 应急模式 - 云VAE Fine-tuning 设备: {self.device}")
+            
+            # 极端内存优化配置
+            self.config = {
+                'batch_size': 4,  # 极小batch size
+                'gradient_accumulation_steps': 4,  # 增加梯度累积
+                'learning_rate': 1e-5,
+                'weight_decay': 0.01,
+                'max_epochs': 15,  # 减少训练轮次
+                'data_dir': data_dir,
+                'save_dir': './vae_finetuned',
+                'reconstruction_weight': 1.0,
+                'kl_weight': 0.05,  # 进一步降低KL权重
+                'perceptual_weight': 0.1,  # 保持轻量感知损失
+                'use_perceptual_loss': True,  # 保持感知损失开启
+                'save_every_epochs': 10,
+                'eval_every_epochs': 5,
+                'use_gradient_checkpointing': True,
+                'mixed_precision': MIXED_PRECISION_AVAILABLE,
+            }
+            
+            # 直接初始化父类的组件，跳过父类__init__
+            os.makedirs(self.config['save_dir'], exist_ok=True)
+            
+            # 数据加载器
+            print("📁 加载应急模式数据集...")
+            self.train_loader, self.val_loader, train_size, val_size = build_cloud_dataloader(
+                root_dir=self.config['data_dir'],
+                batch_size=self.config['batch_size'],
+                num_workers=0,
+                val_split=0.3
+            )
+            print(f"   应急模式batch size: {self.config['batch_size']}")
+            print(f"   有效batch size: {self.config['batch_size'] * self.config['gradient_accumulation_steps']}")
+            
+            # 加载VAE
+            print("📦 加载预训练AutoencoderKL (应急模式)...")
+            self.vae = AutoencoderKL.from_pretrained(
+                "runwayml/stable-diffusion-v1-5", 
+                subfolder="vae"
+            ).to(self.device)
+            
+            # 启用梯度检查点
+            if hasattr(self.vae, 'enable_gradient_checkpointing'):
+                self.vae.enable_gradient_checkpointing()
+                print("✅ VAE梯度检查点已启用")
+            
+            for param in self.vae.parameters():
+                param.requires_grad = True
+            
+            self.setup_optimizer()
+            self.mse_loss = nn.MSELoss()
+            self.setup_perceptual_loss()  # 会被配置跳过
+            
+            if self.config['mixed_precision']:
+                self.scaler = GradScaler()
+                print("✅ 混合精度训练已启用")
+            
+            self.train_history = {
+                'epoch': [], 'train_loss': [], 'recon_loss': [],
+                'kl_loss': [], 'perceptual_loss': [], 'val_mse': []
+            }
+            
+            self.clear_memory()
+            print("✅ 应急模式Fine-tuning器初始化完成!")
+        
+        def setup_perceptual_loss(self):
+            """应急模式轻量级感知损失"""
+            try:
+                from torchvision.models import vgg16, VGG16_Weights
+                # 应急模式使用更少的VGG层
+                self.perceptual_net = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features[:8].to(self.device)
+                for param in self.perceptual_net.parameters():
+                    param.requires_grad = False
+                self.perceptual_net.eval()
+                print("✅ 应急模式轻量级VGG感知损失已设置")
+            except:
+                print("⚠️  VGG16不可用，应急模式跳过感知损失")
+                self.perceptual_net = None
+    
+    return EmergencyCloudVAEFineTuner(data_dir)
+
 def main():
     """主函数"""
     print("🌐 启动云VAE Fine-tuning完整训练...")
+    
+    # 设置CUDA内存分配策略
+    if torch.cuda.is_available():
+        # 启用内存分片管理
+        torch.cuda.set_per_process_memory_fraction(0.95)  # 使用95%的显存
+        torch.cuda.empty_cache()
+        print(f"🔧 CUDA内存优化设置完成")
     
     # 云环境数据路径
     data_dir = '/kaggle/input/dataset'
@@ -609,6 +798,40 @@ def main():
         print("💡 VAE已经适配微多普勒时频图域，可以用于LDM训练")
         
         return best_loss
+        
+    except RuntimeError as e:
+        if "out of memory" in str(e):
+            print(f"❌ 显存不足错误: {e}")
+            print("🆘 启动应急低内存模式...")
+            
+            # 清理内存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+            
+            try:
+                # 尝试应急模式
+                emergency_finetuner = create_emergency_low_memory_finetuner(data_dir)
+                best_loss = emergency_finetuner.finetune()
+                
+                print(f"\n🎯 应急模式VAE Fine-tuning完成，最佳重建损失: {best_loss:.4f}")
+                return best_loss
+                
+            except Exception as emergency_e:
+                print(f"❌ 应急模式也失败了: {emergency_e}")
+                print("💡 最终建议:")
+                print("   1. 重启内核清理所有内存")
+                print("   2. 手动设置batch_size=2")
+                print("   3. 使用CPU训练（非常慢）")
+                return None
+        else:
+            print(f"❌ 运行时错误: {e}")
+        
+        # 清理内存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+        return None
         
     except Exception as e:
         print(f"❌ 训练过程中出现错误: {e}")
