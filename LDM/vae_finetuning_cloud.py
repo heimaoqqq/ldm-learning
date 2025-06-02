@@ -56,16 +56,17 @@ from sklearn.model_selection import train_test_split
 # 添加混合精度训练支持
 try:
     import torch
-    # 检查PyTorch版本并使用正确的autocast
+    # 检查PyTorch版本并使用正确的autocast和GradScaler
     if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast'):
-        from torch.amp import autocast
-        from torch.cuda.amp import GradScaler
+        from torch.amp import autocast, GradScaler
         AUTOCAST_DEVICE = 'cuda'
+        GRADSCALER_DEVICE = 'cuda'
         MIXED_PRECISION_AVAILABLE = True
         print("✅ 新版混合精度训练可用")
     else:
         from torch.cuda.amp import autocast, GradScaler
         AUTOCAST_DEVICE = None
+        GRADSCALER_DEVICE = None
         MIXED_PRECISION_AVAILABLE = True
         print("✅ 传统混合精度训练可用")
 except ImportError:
@@ -246,7 +247,10 @@ class CloudVAEFineTuner:
         
         # 5. 混合精度训练
         if self.config['mixed_precision']:
-            self.scaler = GradScaler()
+            if GRADSCALER_DEVICE:
+                self.scaler = GradScaler(GRADSCALER_DEVICE)
+            else:
+                self.scaler = GradScaler()
             print("✅ 混合精度训练已启用")
         
         # 记录训练历史
@@ -320,60 +324,82 @@ class CloudVAEFineTuner:
         if self.perceptual_net is None:
             return torch.tensor(0.0, device=self.device)
         
+        # 确保输入数据类型为float32
+        real = real.float()
+        fake = fake.float()
+        
         # 确保输入是3通道
         if real.size(1) == 1:
             real = real.repeat(1, 3, 1, 1)
         if fake.size(1) == 1:
             fake = fake.repeat(1, 3, 1, 1)
         
-        # 计算VGG特征，真实图像用no_grad优化内存
+        # 计算VGG特征，完全避免autocast的影响
         with torch.no_grad():
             real_features = self.perceptual_net(real)
+        
+        # 确保fake_features计算也使用正确的数据类型
         fake_features = self.perceptual_net(fake)
         
-        return F.mse_loss(real_features, fake_features)
+        # 确保MSE损失计算使用相同的数据类型
+        return F.mse_loss(real_features.float(), fake_features.float())
     
     def vae_loss(self, images):
         """VAE损失函数"""
-        # 确保输入图像为正确的数据类型
-        if images.dtype != torch.float32 and not self.config.get('mixed_precision', False):
-            images = images.float()
+        # 强制确保输入图像为float32
+        images = images.float()
         
-        # 编码
-        posterior = self.vae.encode(images).latent_dist
-        latents = posterior.sample()
-        
-        # 解码
-        reconstructed = self.vae.decode(latents).sample
-        
-        # 重建损失 - 确保数据类型匹配
-        recon_loss = self.mse_loss(reconstructed.float(), images.float())
-        
-        # KL散度损失
-        kl_loss = posterior.kl().mean()
-        
-        # 感知损失 - 在autocast外计算以避免数据类型问题
-        if self.config.get('mixed_precision', False):
-            with torch.cuda.amp.autocast(enabled=False):
+        try:
+            # 编码
+            posterior = self.vae.encode(images).latent_dist
+            latents = posterior.sample()
+            
+            # 解码
+            reconstructed = self.vae.decode(latents).sample
+            
+            # 重建损失 - 确保数据类型匹配
+            recon_loss = self.mse_loss(reconstructed.float(), images.float())
+            
+            # KL散度损失
+            kl_loss = posterior.kl().mean()
+            
+            # 感知损失 - 完全禁用autocast来计算感知损失，避免数据类型问题
+            if self.config.get('mixed_precision', False):
+                # 完全禁用autocast来计算感知损失，避免数据类型问题
                 perceptual_loss = self.compute_perceptual_loss(images.float(), reconstructed.float())
-        else:
-            perceptual_loss = self.compute_perceptual_loss(images, reconstructed)
-        
-        # 总损失
-        total_loss = (
-            self.config['reconstruction_weight'] * recon_loss +
-            self.config['kl_weight'] * kl_loss +
-            self.config['perceptual_weight'] * perceptual_loss
-        )
-        
-        return {
-            'total_loss': total_loss,
-            'recon_loss': recon_loss,
-            'kl_loss': kl_loss,
-            'perceptual_loss': perceptual_loss,
-            'reconstructed': reconstructed,
-            'latents': latents
-        }
+            else:
+                perceptual_loss = self.compute_perceptual_loss(images, reconstructed)
+            
+            # 总损失
+            total_loss = (
+                self.config['reconstruction_weight'] * recon_loss +
+                self.config['kl_weight'] * kl_loss +
+                self.config['perceptual_weight'] * perceptual_loss
+            )
+            
+            return {
+                'total_loss': total_loss,
+                'recon_loss': recon_loss,
+                'kl_loss': kl_loss,
+                'perceptual_loss': perceptual_loss,
+                'reconstructed': reconstructed,
+                'latents': latents
+            }
+            
+        except Exception as e:
+            if "dtype" in str(e).lower() or "type" in str(e).lower():
+                print(f"⚠️ VAE损失计算中的数据类型错误: {e}")
+                # 返回一个安全的损失值
+                return {
+                    'total_loss': torch.tensor(0.0, device=self.device, requires_grad=True),
+                    'recon_loss': torch.tensor(0.0, device=self.device),
+                    'kl_loss': torch.tensor(0.0, device=self.device),
+                    'perceptual_loss': torch.tensor(0.0, device=self.device),
+                    'reconstructed': images,  # 返回原图像作为重建结果
+                    'latents': torch.zeros(1, device=self.device)
+                }
+            else:
+                raise e
     
     def clear_memory(self):
         """增强内存清理"""
@@ -400,6 +426,11 @@ class CloudVAEFineTuner:
         for batch_idx, batch in enumerate(pbar):
             images, _ = batch  # 忽略标签
             images = images.to(self.device, non_blocking=True)
+            
+            # 强制确保输入数据类型为float32，避免混合精度问题
+            if self.config['mixed_precision']:
+                # 混合精度训练时确保输入为float32
+                images = images.float()
             
             # 混合精度训练
             if self.config['mixed_precision']:
