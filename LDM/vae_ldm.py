@@ -175,6 +175,7 @@ class VAELatentDiffusionModel(nn.Module):
     def _normalize_latents(self, latents_raw: torch.Tensor) -> torch.Tensor:
         """
         归一化潜在表示，使其接近标准正态分布
+        使用更稳健的归一化方法处理异常值
         
         Args:
             latents_raw: 原始潜在表示
@@ -182,12 +183,24 @@ class VAELatentDiffusionModel(nn.Module):
         Returns:
             normalized_latents: 归一化后的潜在表示
         """
-        # 计算批次统计
-        batch_mean = latents_raw.mean()
-        batch_std = latents_raw.std()
+        # 使用更稳健的统计量：中位数和MAD (Median Absolute Deviation)
+        # 这样可以减少异常值的影响
         
-        # 归一化到接近N(0,1)
-        normalized = (latents_raw - batch_mean) / (batch_std + 1e-8)
+        # 方法1: 百分位数裁剪 + 标准归一化
+        # 裁剪到99%分位数范围，去除极端异常值
+        p1 = torch.quantile(latents_raw, 0.01)
+        p99 = torch.quantile(latents_raw, 0.99)
+        latents_clipped = torch.clamp(latents_raw, p1, p99)
+        
+        # 使用裁剪后的数据计算统计量
+        mean_val = latents_clipped.mean()
+        std_val = latents_clipped.std()
+        
+        # 归一化
+        normalized = (latents_raw - mean_val) / (std_val + 1e-8)
+        
+        # 再次软裁剪到合理范围 [-3, 3] (99.7%概率范围)
+        normalized = torch.clamp(normalized, -3.0, 3.0)
         
         return normalized
     
