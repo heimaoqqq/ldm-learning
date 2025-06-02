@@ -1,7 +1,7 @@
 """
 VAE Fine-tuning - 云服务器完整版本
 针对微多普勒时频图优化AutoencoderKL
-数据集路径：/kaggle/input/dataset/dataset
+数据集路径：/kaggle/input/dataset
 """
 import torch
 import torch.nn as nn
@@ -181,7 +181,7 @@ def build_cloud_dataloader(root_dir, batch_size=8, num_workers=0, val_split=0.3)
 class CloudVAEFineTuner:
     """云环境VAE Fine-tuning器"""
     
-    def __init__(self, data_dir='/kaggle/input/dataset'):
+    def __init__(self, data_dir='/kaggle/input/dataset/dataset'):
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"🚀 云VAE Fine-tuning 设备: {self.device}")
         
@@ -876,7 +876,7 @@ def main():
         print(f"🔧 CUDA内存优化设置完成")
     
     # 云环境数据路径
-    data_dir = '/kaggle/input/dataset'
+    data_dir = '/kaggle/input/dataset/dataset'
     
     if not os.path.exists(data_dir):
         print(f"❌ 数据集目录不存在: {data_dir}")
