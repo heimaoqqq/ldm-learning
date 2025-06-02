@@ -1,7 +1,7 @@
 """
 VAE Fine-tuning - 云服务器完整版本
 针对微多普勒时频图优化AutoencoderKL
-数据集路径：/kaggle/input/dataset
+数据集路径：/kaggle/input/dataset/dataset
 """
 import torch
 import torch.nn as nn
