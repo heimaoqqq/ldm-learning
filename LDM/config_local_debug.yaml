@@ -1,0 +1,62 @@
+# VAE-LDM 本地调试配置
+# 🎯 本地环境FID诊断专用
+
+# ================== 📁 路径配置 ==================
+paths:
+  vae_checkpoint: '/kaggle/input/vae-best-fid/adv_vqvae_best_fid.pth'  # 本地VAE路径
+  data_dir: '/kaggle/input/datasett'                                   # 本地数据集路径
+  save_dir: './debug_checkpoints'                              # 本地保存路径
+
+# ================== 🎛️ 模型配置 ==================
+model:
+  num_classes: 31
+  image_size: 32              
+  diffusion_steps: 1000       
+  noise_schedule: "cosine"    
+
+# ================== 🏃 训练配置 ==================
+training:   
+  batch_size: 4                    # 小batch size用于调试
+  gradient_accumulation_steps: 2   
+  learning_rate: 0.0001           
+  weight_decay: 0.01               
+  max_epochs: 50                   # 调试用少轮数
+  
+  log_interval: 5                  
+  save_interval_epochs: 10         
+  eval_interval: 5                 # 频繁评估用于调试
+  
+  enable_wandb: false
+  num_workers: 0                   # 避免多进程问题
+
+# ================== 📊 评估配置 ==================
+evaluation:
+  eval_classes: 3                  # 调试用少量类别
+  samples_per_class: 20            # 调试用少量样本
+  ddim_steps: 50                   
+  eta: 0.0                         
+  max_real_samples: 200            # 调试用少量真实样本
+  
+# ================== 🎮 GPU优化配置 ==================
+gpu:
+  device: 'cuda'
+  mixed_precision: false
+  gradient_clip: 1.0
+
+# ================== 🎨 采样配置 ==================
+sampling:
+  guidance_scale: 1.0              # 先不用CFG
+  use_ddim: true
+  num_inference_steps: 50          
+
+# ================== 📝 实验记录 ==================
+experiment:
+  name: "VAE-LDM-Local-Debug"
+  description: "本地FID诊断版本"
+  version: "debug"
+
+# ================== 🔧 调试配置 ==================
+debug:
+  verbose: true
+  save_samples: true
+  profile: false 
