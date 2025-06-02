@@ -129,7 +129,7 @@ class VAELDMTrainer:
             labels = batch['label'].to(self.device, dtype=torch.long)
             
             # 前向传播
-            losses = self.model(images, labels)
+            losses = self.model(images, labels, current_epoch=self.current_epoch)
             loss = losses['loss'].mean()
             
             # 梯度累积
