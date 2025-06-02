@@ -1,19 +1,26 @@
 """
-快速验证训练 - 云服务器版本
-训练5个epoch评估FID趋势，决定是否需要fine-tune VAE
-适配Kaggle等云环境
+快速验证训练 - 云服务器内存优化版本
+解决CUDA OOM问题，优化内存使用
 """
 import torch
 import torch.nn.functional as F
 import numpy as np
 import os
 import sys
+import gc
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 # 云环境路径设置
 print("🌐 云服务器环境初始化...")
 print(f"📂 当前工作目录: {os.getcwd()}")
+
+# 内存优化设置
+torch.backends.cudnn.benchmark = True  # 优化cudnn性能
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()  # 清空CUDA缓存
+    print(f"🚀 CUDA设备: {torch.cuda.get_device_name()}")
+    print(f"💾 总显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
 
 # 检查并安装必要的依赖
 def check_and_install_dependencies():
@@ -46,14 +53,12 @@ try:
     print("✅ 成功导入 vae_ldm_standard")
 except ImportError as e:
     print(f"❌ 导入 vae_ldm_standard 失败: {e}")
-    print("💡 请确保所有必要文件都已上传到云环境")
 
 try:
     from fid_evaluation import FIDEvaluator
     print("✅ 成功导入 fid_evaluation")
 except ImportError as e:
     print(f"❌ 导入 fid_evaluation 失败: {e}")
-    print("💡 请确保 fid_evaluation.py 文件已上传")
 
 # 云环境数据加载器
 from torch.utils.data import Dataset, DataLoader
@@ -137,30 +142,6 @@ def build_cloud_dataloader(root_dir, batch_size=4, num_workers=2, val_split=0.3)
             except (ValueError, IndexError) as e:
                 print(f"⚠️  无法解析文件夹名 {folder_name}: {e}")
                 continue
-    else:
-        # 直接扫描所有图片文件
-        print("📁 未发现ID文件夹结构，直接扫描图片...")
-        for ext in ["*.jpg", "*.jpeg", "*.png", "*.bmp"]:
-            all_image_paths.extend(glob.glob(os.path.join(root_dir, "**", ext), recursive=True))
-        
-        # 从文件名推断类别（简化版本）
-        for img_path in all_image_paths:
-            filename = os.path.basename(img_path)
-            try:
-                # 尝试从文件名提取ID
-                if 'ID_' in filename:
-                    class_id = int(filename.split('ID_')[1].split('_')[0]) - 1
-                else:
-                    # 默认分配类别0
-                    class_id = 0
-                
-                if 0 <= class_id <= 30:
-                    all_class_ids.append(class_id)
-                else:
-                    all_class_ids.append(0)  # 默认类别
-                    
-            except (ValueError, IndexError):
-                all_class_ids.append(0)  # 默认类别
 
     if not all_image_paths:
         raise ValueError(f"❌ 在 {root_dir} 中没有找到图片文件")
@@ -191,22 +172,24 @@ def build_cloud_dataloader(root_dir, batch_size=4, num_workers=2, val_split=0.3)
     
     return train_loader, val_loader, len(train_dataset), len(val_dataset)
 
-class CloudQuickValidationTrainer:
-    """云环境快速验证训练器"""
+class OptimizedCloudTrainer:
+    """内存优化的云环境快速验证训练器"""
     
     def __init__(self, data_dir='/kaggle/input/dataset'):
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"🚀 云服务器设备: {self.device}")
         
-        # 云环境配置
+        # 内存优化配置
         self.config = {
-            'batch_size': 8,  # 云环境可以用更大的batch size
+            'batch_size': 4,  # 减小批次大小以节约内存
             'learning_rate': 0.0005,
             'weight_decay': 0.001,
             'max_epochs': 5,
             'data_dir': data_dir,
-            'save_dir': './quick_validation_results',  # 云环境保存路径
-            'num_workers': 2  # 云环境worker数量
+            'save_dir': './quick_validation_results',
+            'num_workers': 1,  # 减少工作进程
+            'fid_samples': 50,  # 大幅减少FID评估样本数
+            'sample_batch_size': 8,  # 小批次生成样本
         }
         
         # 创建保存目录
@@ -239,12 +222,12 @@ class CloudQuickValidationTrainer:
             weight_decay=self.config['weight_decay']
         )
         
-        # 4. 初始化FID评估器
+        # 4. 初始化FID评估器 - 更少样本
         print("📊 初始化FID评估器...")
         self.fid_evaluator = FIDEvaluator(device=self.device)
         self.fid_evaluator.compute_real_features(
             self.val_loader, 
-            max_samples=200
+            max_samples=100  # 减少真实样本数
         )
         
         # 记录训练历史
@@ -254,7 +237,13 @@ class CloudQuickValidationTrainer:
             'fid_score': []
         }
         
-        print("✅ 云环境快速验证训练器初始化完成!")
+        print("✅ 内存优化云环境训练器初始化完成!")
+    
+    def clear_memory(self):
+        """清理CUDA内存"""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
     
     def train_epoch(self, epoch: int):
         """训练一个epoch"""
@@ -290,76 +279,137 @@ class CloudQuickValidationTrainer:
                 'Avg': f'{total_loss/num_batches:.4f}'
             })
             
-            # 云环境限制batch数量以加速验证
-            if batch_idx >= 100:  # 云环境可以训练更多batch
+            # 定期清理内存
+            if batch_idx % 20 == 0:
+                self.clear_memory()
+            
+            # 训练100个batch后停止
+            if batch_idx >= 100:
                 break
         
         avg_loss = total_loss / num_batches
+        self.clear_memory()  # 训练完成后清理内存
         return avg_loss
     
     @torch.no_grad()
-    def evaluate_fid(self, epoch: int, num_samples: int = 200):
-        """FID评估"""
-        print(f"📊 Epoch {epoch+1} FID评估...")
+    def evaluate_fid(self, epoch: int):
+        """内存优化的FID评估"""
+        print(f"📊 Epoch {epoch+1} FID评估（内存优化模式）...")
         
         self.model.eval()
+        self.clear_memory()  # 开始前清理内存
         
-        # 随机选择类别
-        classes = torch.randint(0, 31, (num_samples,), device=self.device)
+        num_samples = self.config['fid_samples']  # 使用更少样本
+        batch_size = self.config['sample_batch_size']  # 小批次生成
         
-        # 生成样本
-        generated_images, _ = self.model.sample(
-            num_samples=num_samples,
-            class_labels=classes,
-            use_ddim=True,
-            num_inference_steps=50
-        )
+        all_generated_images = []
         
-        # 计算FID
-        fid_score = self.fid_evaluator.calculate_fid_score(generated_images)
+        # 分批生成样本以节约内存
+        for i in range(0, num_samples, batch_size):
+            current_batch_size = min(batch_size, num_samples - i)
+            
+            # 随机选择类别
+            classes = torch.randint(0, 31, (current_batch_size,), device=self.device)
+            
+            try:
+                # 生成样本
+                generated_images, _ = self.model.sample(
+                    num_samples=current_batch_size,
+                    class_labels=classes,
+                    use_ddim=True,
+                    num_inference_steps=20  # 减少推理步数
+                )
+                
+                # 移动到CPU节约GPU内存
+                all_generated_images.append(generated_images.cpu())
+                
+                # 清理GPU内存
+                del generated_images, classes
+                self.clear_memory()
+                
+                print(f"   完成 {i+current_batch_size}/{num_samples} 样本")
+                
+            except torch.cuda.OutOfMemoryError:
+                print(f"⚠️  内存不足，跳过第{i//batch_size+1}批")
+                self.clear_memory()
+                continue
         
-        print(f"🎯 Epoch {epoch+1} FID: {fid_score:.2f}")
+        if not all_generated_images:
+            print("❌ 无法生成任何样本，FID评估失败")
+            return float('inf')
+        
+        # 合并所有生成的图像
+        generated_images = torch.cat(all_generated_images, dim=0).to(self.device)
+        
+        try:
+            # 计算FID
+            fid_score = self.fid_evaluator.calculate_fid_score(generated_images)
+            print(f"🎯 Epoch {epoch+1} FID: {fid_score:.2f} (基于{len(generated_images)}个样本)")
+            
+        except Exception as e:
+            print(f"❌ FID计算失败: {e}")
+            fid_score = float('inf')
+        
+        finally:
+            # 清理内存
+            del generated_images
+            self.clear_memory()
         
         return fid_score
     
-    def save_sample_images(self, epoch: int, num_samples: int = 16):
-        """保存样本图像"""
+    def save_sample_images(self, epoch: int, num_samples: int = 8):
+        """保存样本图像 - 内存优化版本"""
         self.model.eval()
+        self.clear_memory()
         
-        with torch.no_grad():
-            # 生成样本
-            classes = torch.arange(min(16, 31), device=self.device)[:num_samples]
-            generated_images, _ = self.model.sample(
-                num_samples=num_samples,
-                class_labels=classes,
-                use_ddim=True,
-                num_inference_steps=50
-            )
-            
-            # 反归一化
-            def denormalize(tensor):
-                return torch.clamp((tensor + 1) / 2, 0, 1)
-            
-            images = denormalize(generated_images).cpu()
-            
-            # 创建网格显示
-            fig, axes = plt.subplots(4, 4, figsize=(16, 16))
-            axes = axes.flatten()
-            
-            for i in range(num_samples):
-                img = images[i].permute(1, 2, 0).numpy()
-                axes[i].imshow(img)
-                axes[i].set_title(f'Class {classes[i].item()}')
-                axes[i].axis('off')
-            
-            plt.tight_layout()
-            plt.savefig(f'{self.config["save_dir"]}/samples_epoch_{epoch+1}.png', 
-                       dpi=150, bbox_inches='tight')
-            plt.close()
+        try:
+            with torch.no_grad():
+                # 生成少量样本用于可视化
+                classes = torch.arange(min(num_samples, 31), device=self.device)[:num_samples]
+                generated_images, _ = self.model.sample(
+                    num_samples=num_samples,
+                    class_labels=classes,
+                    use_ddim=True,
+                    num_inference_steps=20
+                )
+                
+                # 反归一化
+                def denormalize(tensor):
+                    return torch.clamp((tensor + 1) / 2, 0, 1)
+                
+                images = denormalize(generated_images).cpu()
+                
+                # 创建网格显示
+                grid_size = int(np.ceil(np.sqrt(num_samples)))
+                fig, axes = plt.subplots(grid_size, grid_size, figsize=(12, 12))
+                axes = axes.flatten() if num_samples > 1 else [axes]
+                
+                for i in range(num_samples):
+                    img = images[i].permute(1, 2, 0).numpy()
+                    axes[i].imshow(img)
+                    axes[i].set_title(f'Class {classes[i].item()}')
+                    axes[i].axis('off')
+                
+                # 隐藏多余的子图
+                for i in range(num_samples, len(axes)):
+                    axes[i].axis('off')
+                
+                plt.tight_layout()
+                plt.savefig(f'{self.config["save_dir"]}/samples_epoch_{epoch+1}.png', 
+                           dpi=150, bbox_inches='tight')
+                plt.close()
+                
+                # 清理内存
+                del generated_images, images
+                self.clear_memory()
+                
+        except Exception as e:
+            print(f"⚠️  样本生成失败: {e}")
+            self.clear_memory()
     
     def train(self):
         """主训练循环"""
-        print("🚀 开始云环境快速验证训练...")
+        print("🚀 开始内存优化云环境训练...")
         print("=" * 60)
         
         best_fid = float('inf')
@@ -371,8 +421,8 @@ class CloudQuickValidationTrainer:
             avg_loss = self.train_epoch(epoch)
             print(f"📊 训练损失: {avg_loss:.4f}")
             
-            # 评估FID
-            fid_score = self.evaluate_fid(epoch, num_samples=200)
+            # 评估FID - 内存优化版本
+            fid_score = self.evaluate_fid(epoch)
             
             # 保存样本图像
             if epoch % 2 == 0:
@@ -386,68 +436,43 @@ class CloudQuickValidationTrainer:
             # 更新最佳FID
             if fid_score < best_fid:
                 best_fid = fid_score
-                # 保存最佳模型
-                self.model.save_checkpoint(
-                    f'{self.config["save_dir"]}/best_model.pth',
-                    epoch,
-                    self.optimizer.state_dict()
-                )
-                print(f"💾 保存最佳模型 (FID: {best_fid:.2f})")
+                try:
+                    # 保存最佳模型
+                    self.model.save_checkpoint(
+                        f'{self.config["save_dir"]}/best_model.pth',
+                        epoch,
+                        self.optimizer.state_dict()
+                    )
+                    print(f"💾 保存最佳模型 (FID: {best_fid:.2f})")
+                except Exception as e:
+                    print(f"⚠️  模型保存失败: {e}")
             
             print(f"🏆 当前最佳FID: {best_fid:.2f}")
+            
+            # 每个epoch后清理内存
+            self.clear_memory()
         
         # 训练完成总结
         print("\n" + "=" * 60)
-        print("🎉 云环境快速验证训练完成!")
+        print("🎉 内存优化云环境训练完成!")
         print(f"🏆 最佳FID: {best_fid:.2f}")
-        
-        # 绘制训练曲线
-        self.plot_training_curves()
         
         # 判断结果
         if best_fid < 50:
             print("✅ 成功！FID < 50，标准AutoencoderKL可以直接使用")
             print("💡 建议：继续用方案A进行完整训练")
-            print("🚀 可以开始运行完整的LDM训练脚本")
         elif best_fid < 100:
-            print("⚠️  FID在可接受范围，但建议Fine-tune VAE")
+            print("⚠️  FID在可接受范围，建议Fine-tune VAE")
             print("💡 建议：转向方案B，先Fine-tune AutoencoderKL")
         else:
             print("❌ FID较高，需要进一步优化")
             print("💡 建议：检查数据质量或使用方案B/C")
         
         return best_fid
-    
-    def plot_training_curves(self):
-        """绘制训练曲线"""
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
-        
-        # 训练损失
-        ax1.plot(self.train_history['epoch'], self.train_history['train_loss'])
-        ax1.set_title('Training Loss')
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('Loss')
-        ax1.grid(True)
-        
-        # FID分数
-        ax2.plot(self.train_history['epoch'], self.train_history['fid_score'], 'r-o')
-        ax2.axhline(y=50, color='g', linestyle='--', label='Target FID=50')
-        ax2.set_title('FID Score')
-        ax2.set_xlabel('Epoch')
-        ax2.set_ylabel('FID')
-        ax2.legend()
-        ax2.grid(True)
-        
-        plt.tight_layout()
-        plt.savefig(f'{self.config["save_dir"]}/training_curves.png', 
-                   dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        print(f"📈 训练曲线已保存到: {self.config['save_dir']}/training_curves.png")
 
 def main():
     """主函数"""
-    print("🌐 启动云环境快速验证训练...")
+    print("🌐 启动内存优化云环境训练...")
     
     # 检查数据路径
     data_paths = ['/kaggle/input/dataset', './dataset', '../dataset']
@@ -461,15 +486,21 @@ def main():
     
     if data_dir is None:
         print("❌ 未找到数据集，请检查路径")
-        print("💡 请确保数据集已正确上传到云环境")
         return None
     
-    trainer = CloudQuickValidationTrainer(data_dir=data_dir)
-    best_fid = trainer.train()
-    
-    print(f"\n🎯 最终结果: FID = {best_fid:.2f}")
-    
-    return best_fid
+    try:
+        trainer = OptimizedCloudTrainer(data_dir=data_dir)
+        best_fid = trainer.train()
+        print(f"\n🎯 最终结果: FID = {best_fid:.2f}")
+        return best_fid
+        
+    except Exception as e:
+        print(f"❌ 训练过程中出现错误: {e}")
+        # 清理内存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+        return None
 
 if __name__ == "__main__":
     main() 
