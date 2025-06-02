@@ -158,11 +158,32 @@ class VAELDMTrainer:
         return {'train_loss': np.mean(epoch_losses)}
     
     def evaluate(self) -> Dict[str, float]:
-        """评估模型（计算FID）"""
-        print("📊 开始FID评估...")
+        """评估模型（计算验证损失和FID）"""
+        print("📊 开始模型评估...")
         self.model.eval()
         
-        # 生成样本用于FID计算
+        # 1. 计算验证损失
+        val_losses = []
+        print("   计算验证损失...")
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(tqdm(self.val_loader, desc="验证", leave=False)):
+                images = batch['image'].to(self.device)
+                labels = batch['label'].to(self.device, dtype=torch.long)
+                
+                # 计算验证损失
+                losses = self.model(images, labels, current_epoch=self.current_epoch)
+                loss = losses['loss'].mean()
+                val_losses.append(loss.item())
+                
+                # 限制验证batch数量以节省时间
+                if batch_idx >= 50:  # 只计算前50个batch的验证损失
+                    break
+        
+        val_loss = np.mean(val_losses)
+        print(f"   验证损失: {val_loss:.4f}")
+        
+        # 2. 计算FID
+        print("   计算FID...")
         num_samples = 150  # 3类 × 50样本
         class_labels = torch.randint(0, 31, (num_samples,), device=self.device, dtype=torch.long)
         
@@ -180,7 +201,7 @@ class VAELDMTrainer:
         # 计算FID
         fid_score = self.fid_evaluator.calculate_fid_score(generated_images)
         
-        return {'fid': fid_score}
+        return {'val_loss': val_loss, 'fid': fid_score}
     
     def save_checkpoint(self, is_best: bool = False):
         """保存检查点"""
@@ -209,7 +230,10 @@ class VAELDMTrainer:
         print(f"📊 训练数据: {len(self.train_loader)} batches")
         print(f"📈 验证数据: {len(self.val_loader)} batches")
         print(f"💾 每 {self.save_interval_epochs} epochs 保存模型")
-        print(f"📊 每 {self.eval_interval} epochs 评估FID")
+        print(f"📊 每 {self.eval_interval} epochs 评估验证损失和FID")
+        
+        # 添加最佳验证损失跟踪
+        self.best_val_loss = float('inf')
         
         for epoch in range(self.max_epochs):
             self.current_epoch = epoch
@@ -222,18 +246,25 @@ class VAELDMTrainer:
             # 定期评估
             if (epoch + 1) % self.eval_interval == 0:
                 eval_metrics = self.evaluate()
+                val_loss = eval_metrics['val_loss']
                 fid_score = eval_metrics['fid']
                 
-                print(f"📊 FID Score: {fid_score:.2f}")
+                print(f"📊 Val Loss: {val_loss:.4f}, FID Score: {fid_score:.2f}")
                 
-                # 检查是否是最佳模型
-                is_best = fid_score < self.best_fid
-                if is_best:
+                # 检查是否是最佳模型（基于FID）
+                is_best_fid = fid_score < self.best_fid
+                if is_best_fid:
                     self.best_fid = fid_score
                     print(f"🎉 新的最佳FID: {fid_score:.2f}")
                 
-                # 保存最佳模型
-                if is_best:
+                # 检查是否是最佳验证损失
+                is_best_val_loss = val_loss < self.best_val_loss
+                if is_best_val_loss:
+                    self.best_val_loss = val_loss
+                    print(f"🎯 新的最佳验证损失: {val_loss:.4f}")
+                
+                # 保存最佳模型（基于FID）
+                if is_best_fid:
                     self.save_checkpoint(is_best=True)
             
             # 定期保存检查点 - 添加调试输出
@@ -243,6 +274,7 @@ class VAELDMTrainer:
         
         print("🎉 训练完成!")
         print(f"🏆 最佳FID: {self.best_fid:.2f}")
+        print(f"🎯 最佳验证损失: {self.best_val_loss:.4f}")
 
 def load_config(config_path: str = "config_kaggle.yaml") -> Dict[str, Any]:
     """加载YAML配置文件"""
