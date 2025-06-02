@@ -175,7 +175,7 @@ class VAELatentDiffusionModel(nn.Module):
     def _normalize_latents(self, latents_raw: torch.Tensor) -> torch.Tensor:
         """
         归一化潜在表示，使其接近标准正态分布
-        使用分位数映射方法确保完全对称的分布
+        专门处理严重偏斜和异常分布的情况
         
         Args:
             latents_raw: 原始潜在表示
@@ -183,34 +183,37 @@ class VAELatentDiffusionModel(nn.Module):
         Returns:
             normalized_latents: 归一化后的潜在表示
         """
-        # 方法：分位数标准化 (Quantile Normalization)
-        # 将数据映射到标准正态分布，确保完美对称
+        # 对于严重偏斜的分布，使用Box-Cox变换 + 鲁棒归一化
         
-        # 1. 展平数据进行统计分析
-        flat_latents = latents_raw.flatten()
+        # 1. 处理非负约束（VAE输出可能全为非负）
+        # 添加小的偏移确保所有值为正，以便进行对数变换
+        epsilon = 1e-6
+        shifted = latents_raw + epsilon
         
-        # 2. 计算经验分位数
-        # 使用更保守的范围避免极值
-        q05 = torch.quantile(flat_latents, 0.05)  # 5%分位数
-        q95 = torch.quantile(flat_latents, 0.95)  # 95%分位数
-        q_median = torch.quantile(flat_latents, 0.5)  # 中位数
+        # 2. 对数变换减少右偏度
+        # 这可以有效处理指数分布或伽马分布的数据
+        log_transformed = torch.log(shifted + 1.0)  # log(1+x)更稳定
         
-        # 3. 使用鲁棒的标准差估计（基于四分位距）
-        q25 = torch.quantile(flat_latents, 0.25)
-        q75 = torch.quantile(flat_latents, 0.75)
-        robust_std = (q75 - q25) / 1.349  # 1.349是正态分布的IQR转换系数
+        # 3. 计算鲁棒统计量（使用分位数而非均值/方差）
+        flat_data = log_transformed.flatten()
         
-        # 4. 中心化和标准化
-        # 使用中位数而非均值来避免极值影响
-        centered = latents_raw - q_median
-        standardized = centered / (robust_std + 1e-8)
+        # 使用更宽的分位数范围处理极值
+        q01 = torch.quantile(flat_data, 0.01)
+        q99 = torch.quantile(flat_data, 0.99)
+        q_median = torch.quantile(flat_data, 0.5)
         
-        # 5. 软截断到合理范围，增加缩放以提高标准差
-        # 使用tanh来软截断，保持分布的连续性
-        # 调整参数：减小除数提高标准差，增加乘数扩大范围
-        normalized = torch.tanh(standardized / 2.0) * 2.5
+        # 使用分位数距离作为尺度参数
+        scale = (q99 - q01) / 4.65  # 4.65 ≈ 2 * 2.326 (99%分位数对应的z分数)
         
-        # 6. 最终微调：确保均值为0，标准差接近1
+        # 4. 鲁棒中心化和缩放
+        centered = log_transformed - q_median
+        scaled = centered / (scale + 1e-8)
+        
+        # 5. 使用erf函数进行软归一化，将任意分布映射到近似正态分布
+        # erf函数具有S形曲线，可以有效压缩极值
+        normalized = torch.erf(scaled / 1.4142) * 2.0  # 1.4142 = sqrt(2)
+        
+        # 6. 最终标准化确保严格的均值=0，标准差=1
         final_mean = normalized.mean()
         final_std = normalized.std()
         normalized = (normalized - final_mean) / (final_std + 1e-8)
@@ -254,9 +257,30 @@ class VAELatentDiffusionModel(nn.Module):
         Returns:
             loss_dict: 包含各种损失的字典
         """
-        # 1. 编码到潜在空间
+        # 1. 编码到潜在空间 - 分步进行以便调试
         with torch.no_grad():
-            latents = self.encode_to_latent(images)
+            # 首先获取原始VAE输出
+            try:
+                if hasattr(self.vae, 'encode'):
+                    raw_latents = self.vae.encode(images)
+                elif hasattr(self.vae, 'encoder') and hasattr(self.vae, 'vq'):
+                    encoded = self.vae.encoder(images)
+                    quantized, vq_loss, perplexity = self.vae.vq(encoded)
+                    raw_latents = quantized
+                else:
+                    encoded = self.vae.encoder(images)
+                    quantized, _, _ = self.vae.vq(encoded)
+                    raw_latents = quantized
+                
+                # 然后进行归一化
+                latents = self._normalize_latents(raw_latents)
+                
+            except Exception as e:
+                print(f"❌ VAE编码失败: {e}")
+                batch_size = images.shape[0]
+                latent_h, latent_w = images.shape[2] // 8, images.shape[3] // 8
+                raw_latents = torch.randn(batch_size, 256, latent_h, latent_w, device=images.device)
+                latents = self._normalize_latents(raw_latents)
         
         # 调试输出：前10个epoch显示潜在表示统计信息
         if current_epoch is not None and current_epoch < 10:
@@ -267,14 +291,11 @@ class VAELatentDiffusionModel(nn.Module):
                 self._debug_batch_count[current_epoch] = 0
             
             if self._debug_batch_count[current_epoch] < 3:  # 每个epoch只显示前3个batch
-                raw_mean = latents.mean().item() / self.latent_scale_factor
-                raw_std = latents.std().item() / self.latent_scale_factor
-                
                 print(f"📊 Epoch {current_epoch+1} Batch {self._debug_batch_count[current_epoch]+1}:")
-                print(f"   缩放因子: {self.latent_scale_factor:.4f}")
-                print(f"   原始潜在表示: 均值={raw_mean:.4f}, 标准差={raw_std:.4f}")
-                print(f"   缩放后潜在表示: 均值={latents.mean().item():.4f}, 标准差={latents.std().item():.4f}")
-                print(f"   潜在表示范围: [{latents.min().item():.4f}, {latents.max().item():.4f}]")
+                print(f"   原始VAE输出: 均值={raw_latents.mean().item():.4f}, 标准差={raw_latents.std().item():.4f}")
+                print(f"   原始VAE范围: [{raw_latents.min().item():.4f}, {raw_latents.max().item():.4f}]")
+                print(f"   归一化后: 均值={latents.mean().item():.4f}, 标准差={latents.std().item():.4f}")
+                print(f"   归一化范围: [{latents.min().item():.4f}, {latents.max().item():.4f}]")
                 
                 self._debug_batch_count[current_epoch] += 1
         
