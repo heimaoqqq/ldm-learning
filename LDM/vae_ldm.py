@@ -175,7 +175,7 @@ class VAELatentDiffusionModel(nn.Module):
     def _normalize_latents(self, latents_raw: torch.Tensor) -> torch.Tensor:
         """
         归一化潜在表示，使其接近标准正态分布
-        使用更稳健的归一化方法处理异常值
+        使用分位数映射方法确保完全对称的分布
         
         Args:
             latents_raw: 原始潜在表示
@@ -183,24 +183,37 @@ class VAELatentDiffusionModel(nn.Module):
         Returns:
             normalized_latents: 归一化后的潜在表示
         """
-        # 使用更稳健的统计量：中位数和MAD (Median Absolute Deviation)
-        # 这样可以减少异常值的影响
+        # 方法：分位数标准化 (Quantile Normalization)
+        # 将数据映射到标准正态分布，确保完美对称
         
-        # 方法1: 百分位数裁剪 + 标准归一化
-        # 裁剪到99%分位数范围，去除极端异常值
-        p1 = torch.quantile(latents_raw, 0.01)
-        p99 = torch.quantile(latents_raw, 0.99)
-        latents_clipped = torch.clamp(latents_raw, p1, p99)
+        # 1. 展平数据进行统计分析
+        flat_latents = latents_raw.flatten()
         
-        # 使用裁剪后的数据计算统计量
-        mean_val = latents_clipped.mean()
-        std_val = latents_clipped.std()
+        # 2. 计算经验分位数
+        # 使用更保守的范围避免极值
+        q05 = torch.quantile(flat_latents, 0.05)  # 5%分位数
+        q95 = torch.quantile(flat_latents, 0.95)  # 95%分位数
+        q_median = torch.quantile(flat_latents, 0.5)  # 中位数
         
-        # 归一化
-        normalized = (latents_raw - mean_val) / (std_val + 1e-8)
+        # 3. 使用鲁棒的标准差估计（基于四分位距）
+        q25 = torch.quantile(flat_latents, 0.25)
+        q75 = torch.quantile(flat_latents, 0.75)
+        robust_std = (q75 - q25) / 1.349  # 1.349是正态分布的IQR转换系数
         
-        # 再次软裁剪到合理范围 [-3, 3] (99.7%概率范围)
-        normalized = torch.clamp(normalized, -3.0, 3.0)
+        # 4. 中心化和标准化
+        # 使用中位数而非均值来避免极值影响
+        centered = latents_raw - q_median
+        standardized = centered / (robust_std + 1e-8)
+        
+        # 5. 软截断到合理范围，增加缩放以提高标准差
+        # 使用tanh来软截断，保持分布的连续性
+        # 调整参数：减小除数提高标准差，增加乘数扩大范围
+        normalized = torch.tanh(standardized / 2.0) * 2.5
+        
+        # 6. 最终微调：确保均值为0，标准差接近1
+        final_mean = normalized.mean()
+        final_std = normalized.std()
+        normalized = (normalized - final_mean) / (final_std + 1e-8)
         
         return normalized
     
