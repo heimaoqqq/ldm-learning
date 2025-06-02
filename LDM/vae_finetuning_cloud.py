@@ -195,7 +195,7 @@ class CloudVAEFineTuner:
             'data_dir': data_dir,
             'save_dir': './vae_finetuned',
             'reconstruction_weight': 1.0,
-            'kl_weight': 0.1,  # 降低KL权重，关注重建质量
+            'kl_weight': 1e-5,  # 大幅降低KL权重，更关注重建质量
             'perceptual_weight': 0.3,  # 恢复合理的感知损失权重
             'use_perceptual_loss': True,  # 保持感知损失开启
             'save_every_epochs': 5,  # 每5个epoch保存一次
@@ -204,6 +204,7 @@ class CloudVAEFineTuner:
             'mixed_precision': MIXED_PRECISION_AVAILABLE,  # 混合精度训练
             'safe_mixed_precision': True,  # 安全模式：遇到问题时自动禁用混合精度
         }
+        self.best_model_checkpoint_path = None # 用于跟踪要删除的旧最佳模型
         
         os.makedirs(self.config['save_dir'], exist_ok=True)
         
@@ -696,26 +697,23 @@ class CloudVAEFineTuner:
         print("🚀 开始云VAE Fine-tuning完整训练...")
         print("=" * 60)
         
-        # 启用异常检测以获取更详细的向后传播错误信息
-        torch.autograd.set_detect_anomaly(True)
-        print("⚠️ PyTorch 异常检测已启用 (用于调试，可能影响速度)")
+        if torch.cuda.is_available(): # 确保只在CUDA可用时设置
+            torch.autograd.set_detect_anomaly(True)
+            print("⚠️ PyTorch 异常检测已启用 (用于调试，可能影响速度)")
         
         best_recon_loss = float('inf')
         
         for epoch in range(self.config['max_epochs']):
             print(f"\n📅 Epoch {epoch+1}/{self.config['max_epochs']}")
             
-            # 训练一个epoch
             train_metrics = self.train_epoch(epoch)
             
-            # 记录训练历史
             self.train_history['epoch'].append(epoch + 1)
             self.train_history['train_loss'].append(train_metrics['avg_loss'])
             self.train_history['recon_loss'].append(train_metrics['avg_recon'])
             self.train_history['kl_loss'].append(train_metrics['avg_kl'])
             self.train_history['perceptual_loss'].append(train_metrics['avg_perceptual'])
             
-            # 定期评估重建质量
             if epoch % self.config['eval_every_epochs'] == 0 or epoch == self.config['max_epochs'] - 1:
                 val_mse, latent_stats = self.evaluate_reconstruction_quality(self.val_loader)
                 self.train_history['val_mse'].append(val_mse)
@@ -727,20 +725,40 @@ class CloudVAEFineTuner:
             print(f"   感知损失: {train_metrics['avg_perceptual']:.4f}")
             print(f"   学习率: {self.scheduler.get_last_lr()[0]:.2e}")
             
-            # 保存最佳模型
+            # 保存最佳模型逻辑修改
+            current_epoch_model_path = f'{self.config["save_dir"]}/vae_finetuned_epoch_{epoch+1}.pth'
+            is_best_model_save = False
             if train_metrics['avg_recon'] < best_recon_loss:
                 best_recon_loss = train_metrics['avg_recon']
-                self.save_finetuned_vae(epoch, train_metrics)
-                print(f"✅ 保存最佳模型 (重建损失: {best_recon_loss:.4f})")
+                
+                # 尝试删除上一个被标记为"最佳"的模型文件
+                if self.best_model_checkpoint_path and os.path.exists(self.best_model_checkpoint_path):
+                    # 检查这个旧的最佳模型是否也是一个定期保存点
+                    try:
+                        # 从文件名提取旧的epoch号
+                        old_epoch_str = self.best_model_checkpoint_path.split('_epoch_')[-1].split('.pth')[0]
+                        old_epoch_idx = int(old_epoch_str) - 1 # epoch号转为0-indexed
+                        is_periodic_save = (old_epoch_idx % self.config['save_every_epochs'] == 0)
+                        
+                        if not is_periodic_save:
+                            print(f"🗑️ 删除旧的最佳模型: {self.best_model_checkpoint_path}")
+                            os.remove(self.best_model_checkpoint_path)
+                        else:
+                            print(f"ℹ️ 保留旧的最佳模型 (同时也是定期保存点): {self.best_model_checkpoint_path}")
+                    except Exception as e_remove:
+                        print(f"⚠️ 无法删除或检查旧的最佳模型: {e_remove}")
+
+                self.save_finetuned_vae(epoch, train_metrics) # 保存当前模型
+                self.best_model_checkpoint_path = current_epoch_model_path # 更新最佳模型路径
+                print(f"✅ 保存新的最佳模型 (重建损失: {best_recon_loss:.4f}): {current_epoch_model_path}")
+                is_best_model_save = True
             
-            # 定期保存检查点
             if epoch % self.config['save_every_epochs'] == 0:
-                self.save_finetuned_vae(epoch, train_metrics)
+                if not is_best_model_save: # 如果此epoch已作为最佳模型保存，则不再重复保存
+                    self.save_finetuned_vae(epoch, train_metrics)
                 self.plot_training_history()
             
             print(f"🏆 当前最佳重建损失: {best_recon_loss:.4f}")
-            
-            # 每个epoch后清理内存
             self.clear_memory()
         
         # 训练完成
