@@ -350,18 +350,19 @@ class CloudVAEFineTuner:
         images = images.float()
         
         try:
-            # 编码
-            posterior = self.vae.encode(images).latent_dist
-            latents = posterior.sample()
-            
-            # 解码
-            reconstructed = self.vae.decode(latents).sample
+            # 编码 - 强制使用float32
+            with torch.cuda.amp.autocast(enabled=False):
+                posterior = self.vae.encode(images.float()).latent_dist
+                latents = posterior.sample().float()
+                
+                # 解码 - 强制使用float32
+                reconstructed = self.vae.decode(latents.float()).sample.float()
             
             # 重建损失 - 确保数据类型匹配
             recon_loss = self.mse_loss(reconstructed.float(), images.float())
             
             # KL散度损失
-            kl_loss = posterior.kl().mean()
+            kl_loss = posterior.kl().mean().float()
             
             # 感知损失 - 完全禁用autocast来计算感知损失，避免数据类型问题
             if self.config.get('mixed_precision', False):
@@ -370,20 +371,20 @@ class CloudVAEFineTuner:
             else:
                 perceptual_loss = self.compute_perceptual_loss(images, reconstructed)
             
-            # 总损失
+            # 总损失 - 确保所有组件都是float32
             total_loss = (
-                self.config['reconstruction_weight'] * recon_loss +
-                self.config['kl_weight'] * kl_loss +
-                self.config['perceptual_weight'] * perceptual_loss
+                self.config['reconstruction_weight'] * recon_loss.float() +
+                self.config['kl_weight'] * kl_loss.float() +
+                self.config['perceptual_weight'] * perceptual_loss.float()
             )
             
             return {
-                'total_loss': total_loss,
-                'recon_loss': recon_loss,
-                'kl_loss': kl_loss,
-                'perceptual_loss': perceptual_loss,
-                'reconstructed': reconstructed,
-                'latents': latents
+                'total_loss': total_loss.float(),
+                'recon_loss': recon_loss.float(),
+                'kl_loss': kl_loss.float(),
+                'perceptual_loss': perceptual_loss.float(),
+                'reconstructed': reconstructed.float(),
+                'latents': latents.float()
             }
             
         except Exception as e:
@@ -457,19 +458,28 @@ class CloudVAEFineTuner:
             
             # 梯度累积
             if (batch_idx + 1) % self.config['gradient_accumulation_steps'] == 0:
-                if self.config['mixed_precision']:
-                    # 梯度裁剪
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
+                try:
+                    if self.config['mixed_precision']:
+                        # 梯度裁剪
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
+                        
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        # 梯度裁剪
+                        torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
+                        self.optimizer.step()
                     
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    # 梯度裁剪
-                    torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
-                    self.optimizer.step()
-                
-                self.optimizer.zero_grad()
+                    self.optimizer.zero_grad()
+                    
+                except RuntimeError as grad_e:
+                    if "dtype" in str(grad_e).lower() or "type" in str(grad_e).lower():
+                        print(f"⚠️ 梯度步骤数据类型错误，跳过此步骤: {grad_e}")
+                        self.optimizer.zero_grad()
+                        continue
+                    else:
+                        raise grad_e
             
             # 记录损失（恢复到原始scale）
             actual_loss = loss.item() * self.config['gradient_accumulation_steps']
@@ -891,7 +901,7 @@ def main():
                 return None
         elif "Unsupported dtype" in str(e) or "dtype" in str(e).lower():
             print(f"❌ 数据类型错误: {e}")
-            print("🔄 禁用混合精度训练重试...")
+            print("🔄 完全禁用混合精度训练重试...")
             
             # 清理内存
             if torch.cuda.is_available():
@@ -899,31 +909,83 @@ def main():
             gc.collect()
             
             try:
-                # 创建禁用混合精度的fine-tuner
-                print("📦 创建FP32精度训练器...")
+                # 创建完全禁用混合精度的fine-tuner
+                print("📦 创建纯FP32精度训练器...")
                 
-                class SafeCloudVAEFineTuner(CloudVAEFineTuner):
+                class PureFP32CloudVAEFineTuner(CloudVAEFineTuner):
                     def __init__(self, data_dir):
-                        # 临时禁用混合精度
-                        global MIXED_PRECISION_AVAILABLE
-                        original_mp = MIXED_PRECISION_AVAILABLE
-                        MIXED_PRECISION_AVAILABLE = False
+                        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+                        print(f"🚀 纯FP32模式 - 云VAE Fine-tuning 设备: {self.device}")
                         
-                        super().__init__(data_dir)
-                        self.config['mixed_precision'] = False
-                        print("✅ FP32精度训练器创建完成")
+                        # 完全禁用混合精度的配置
+                        self.config = {
+                            'batch_size': 6,  # 稍微减小以补偿FP32的内存使用
+                            'gradient_accumulation_steps': 3,  # 调整以保持有效batch size
+                            'learning_rate': 1e-5,
+                            'weight_decay': 0.01,
+                            'max_epochs': 25,
+                            'data_dir': data_dir,
+                            'save_dir': './vae_finetuned',
+                            'reconstruction_weight': 1.0,
+                            'kl_weight': 0.1,
+                            'perceptual_weight': 0.3,
+                            'use_perceptual_loss': True,
+                            'save_every_epochs': 5,
+                            'eval_every_epochs': 2,
+                            'use_gradient_checkpointing': True,
+                            'mixed_precision': False,  # 完全禁用
+                            'safe_mixed_precision': False,
+                        }
                         
-                        # 恢复原始设置
-                        MIXED_PRECISION_AVAILABLE = original_mp
+                        # 跳过父类初始化，手动初始化组件
+                        os.makedirs(self.config['save_dir'], exist_ok=True)
+                        
+                        # 数据加载器
+                        print("📁 加载纯FP32模式数据集...")
+                        self.train_loader, self.val_loader, train_size, val_size = build_cloud_dataloader(
+                            root_dir=self.config['data_dir'],
+                            batch_size=self.config['batch_size'],
+                            num_workers=0,
+                            val_split=0.3
+                        )
+                        print(f"   纯FP32模式batch size: {self.config['batch_size']}")
+                        print(f"   有效batch size: {self.config['batch_size'] * self.config['gradient_accumulation_steps']}")
+                        
+                        # 加载VAE
+                        print("📦 加载预训练AutoencoderKL (纯FP32模式)...")
+                        self.vae = AutoencoderKL.from_pretrained(
+                            "runwayml/stable-diffusion-v1-5", 
+                            subfolder="vae"
+                        ).to(self.device).float()  # 强制float32
+                        
+                        # 启用梯度检查点
+                        if hasattr(self.vae, 'enable_gradient_checkpointing'):
+                            self.vae.enable_gradient_checkpointing()
+                            print("✅ VAE梯度检查点已启用")
+                        
+                        for param in self.vae.parameters():
+                            param.requires_grad = True
+                        
+                        self.setup_optimizer()
+                        self.mse_loss = nn.MSELoss()
+                        self.setup_perceptual_loss()
+                        
+                        self.train_history = {
+                            'epoch': [], 'train_loss': [], 'recon_loss': [],
+                            'kl_loss': [], 'perceptual_loss': [], 'val_mse': []
+                        }
+                        
+                        self.clear_memory()
+                        print("✅ 纯FP32模式Fine-tuning器初始化完成!")
                 
-                safe_finetuner = SafeCloudVAEFineTuner(data_dir)
-                best_loss = safe_finetuner.finetune()
+                pure_fp32_finetuner = PureFP32CloudVAEFineTuner(data_dir)
+                best_loss = pure_fp32_finetuner.finetune()
                 
-                print(f"\n🎯 FP32模式VAE Fine-tuning完成，最佳重建损失: {best_loss:.4f}")
+                print(f"\n🎯 纯FP32模式VAE Fine-tuning完成，最佳重建损失: {best_loss:.4f}")
                 return best_loss
                 
-            except Exception as safe_e:
-                print(f"❌ FP32模式也失败了: {safe_e}")
+            except Exception as fp32_e:
+                print(f"❌ 纯FP32模式也失败了: {fp32_e}")
                 return None
         else:
             print(f"❌ 运行时错误: {e}")
