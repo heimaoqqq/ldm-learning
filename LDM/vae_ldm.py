@@ -156,9 +156,12 @@ class VAELatentDiffusionModel(nn.Module):
                 else:
                     raise ValueError("Unexpected VAE output format")
             
-            # 应用潜变量缩放因子
-            scaled_latents = latents_raw * self.latent_scale_factor
-            return scaled_latents
+            # 1. 先应用基础归一化：确保潜在表示接近标准正态分布
+            latents_normalized = self._normalize_latents(latents_raw)
+            
+            # 2. 直接返回归一化后的结果，不再应用额外的缩放因子
+            # 因为缩放因子应该在扩散训练中自动学习，而不是预先固定
+            return latents_normalized
                      
         except Exception as e:
             print(f"❌ VAE编码失败: {e}")
@@ -168,6 +171,25 @@ class VAELatentDiffusionModel(nn.Module):
             backup_latents = torch.randn(batch_size, 256, latent_h, latent_w, device=images.device)
             print(f"🔄 使用备用随机潜在表示，形状: {backup_latents.shape}")
             return backup_latents
+    
+    def _normalize_latents(self, latents_raw: torch.Tensor) -> torch.Tensor:
+        """
+        归一化潜在表示，使其接近标准正态分布
+        
+        Args:
+            latents_raw: 原始潜在表示
+            
+        Returns:
+            normalized_latents: 归一化后的潜在表示
+        """
+        # 计算批次统计
+        batch_mean = latents_raw.mean()
+        batch_std = latents_raw.std()
+        
+        # 归一化到接近N(0,1)
+        normalized = (latents_raw - batch_mean) / (batch_std + 1e-8)
+        
+        return normalized
     
     @torch.no_grad() 
     def decode_from_latent(self, latents: torch.Tensor) -> torch.Tensor:
@@ -182,8 +204,16 @@ class VAELatentDiffusionModel(nn.Module):
         """
         self.vae.eval()
         
-        # VAE解码
+        # 1. 直接使用输入的潜在表示，不再进行缩放因子的逆操作
+        # 因为编码时已经不再应用缩放因子
+        
+        # 2. VAE解码（直接使用归一化后的潜在表示）
         decoded = self.vae.decode(latents)
+        
+        # 3. 确保输出在正确范围 [-1, 1]
+        # VAE decode输出已经通过tanh，但为了安全起见再次clamp
+        decoded = torch.clamp(decoded, -1.0, 1.0)
+        
         return decoded
     
     def forward(self, images: torch.Tensor, class_labels: Optional[torch.Tensor] = None, current_epoch: Optional[int] = None) -> Dict[str, torch.Tensor]:
