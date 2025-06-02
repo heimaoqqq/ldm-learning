@@ -25,8 +25,8 @@ training:
   
   # 保存和日志配置
   log_interval: 10          # 日志记录间隔 (steps)
-  save_interval_epochs: 50  # 模型保存间隔 (epochs) - 每50个epoch保存一次
-  eval_interval: 20         # FID评估间隔 (epochs) - 每20个epoch评估一次
+  save_interval_epochs: 30  # 模型保存间隔 (epochs) - 每30个epoch保存一次
+  eval_interval: 15         # FID评估间隔 (epochs) - 每15个epoch评估一次
   
   # Kaggle时间限制优化
   enable_wandb: false       # 禁用wandb (Kaggle环境)
