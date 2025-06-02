@@ -26,7 +26,10 @@ class VAELatentDiffusionModel(nn.Module):
         unet_config: Dict[str, Any],
         diffusion_config: Dict[str, Any],
         vae_checkpoint_path: str = None,
-        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+        scale_factor: float = 1.0,
+        vae_scale_factor: float = 0.18215,
+        latent_scale_factor: float = 1.0
     ):
         super().__init__()
         
@@ -46,6 +49,10 @@ class VAELatentDiffusionModel(nn.Module):
         
         # 存储配置信息用于输出
         self.vae_latent_dim = vae_config.get('latent_dim', 256)
+        
+        self.scale_factor = scale_factor
+        self.vae_scale_factor = vae_scale_factor
+        self.latent_scale_factor = latent_scale_factor
         
         print(f"✅ VAE-LDM 初始化完成")
         print(f"   VAE潜在维度: {self.vae_latent_dim}")
@@ -126,15 +133,12 @@ class VAELatentDiffusionModel(nn.Module):
         try:
             # 方法1: 使用encode方法 (最直接)
             if hasattr(self.vae, 'encode'):
-                latents = self.vae.encode(images)
-                return latents
-                
+                latents_raw = self.vae.encode(images)
             # 方法2: 使用编码器 + 量化器
             elif hasattr(self.vae, 'encoder') and hasattr(self.vae, 'vq'):
                 encoded = self.vae.encoder(images)
                 quantized, vq_loss, perplexity = self.vae.vq(encoded)
-                return quantized
-                
+                latents_raw = quantized
             # 方法3: 使用forward，解析返回值（最后备用）
             else:
                 vae_output = self.vae(images)
@@ -143,9 +147,13 @@ class VAELatentDiffusionModel(nn.Module):
                     # 我们需要用编码器+量化获取潜在表示
                     encoded = self.vae.encoder(images)
                     quantized, _, _ = self.vae.vq(encoded)
-                    return quantized
+                    latents_raw = quantized
                 else:
                     raise ValueError("Unexpected VAE output format")
+            
+            # 应用潜变量缩放因子
+            scaled_latents = latents_raw * self.latent_scale_factor
+            return scaled_latents
                      
         except Exception as e:
             print(f"❌ VAE编码失败: {e}")
@@ -187,6 +195,14 @@ class VAELatentDiffusionModel(nn.Module):
         # 1. 编码到潜在空间
         with torch.no_grad():
             latents = self.encode_to_latent(images)
+        
+        # <--- 在这里添加调试打印 --->
+        if not hasattr(self, '_debug_print_count_forward'):
+            self._debug_print_count_forward = 0
+        if self._debug_print_count_forward < 5: # 只打印几次避免刷屏
+            print(f"Debug (VAELatentDiffusionModel.forward): Latents fed to U-Net - Mean: {latents.mean().item():.4f}, Std: {latents.std().item():.4f}, Min: {latents.min().item():.4f}, Max: {latents.max().item():.4f}")
+            self._debug_print_count_forward += 1
+        # <--- 调试打印结束 --->
         
         # 2. 随机采样时间步
         batch_size = latents.shape[0]
@@ -381,22 +397,20 @@ def create_vae_ldm(
     }
     
     # U-Net配置
-    unet_config = {
-        'image_size': image_size,
-        'in_channels': 256,  # VAE潜在维度
-        'model_channels': 128,
-        'out_channels': 256,  # VAE潜在维度
-        'num_res_blocks': 2,
-        'attention_resolutions': (8, 16),
+    unet_params_for_model = {
+        'image_size': image_size,             # 来自函数参数
+        'in_channels': 256,                  # 示例值，可以配置
+        'model_channels': 192,                # 示例值，可以配置
+        'out_channels': 256,                  # 示例值，可以配置
+        'num_res_blocks': 3,                  # 示例值
+        'attention_resolutions': (4, 8, 16),  # 示例值，基于32x32潜在空间
         'dropout': 0.1,
-        'channel_mult': (1, 2, 4, 8),
-        'conv_resample': True,
-        'dims': 2,
-        'num_classes': num_classes,
+        'channel_mult': (1, 2, 3, 4),       # 示例值
+        'num_classes': num_classes,           # 来自函数参数
         'use_checkpoint': False,
         'num_heads': 4,
         'num_heads_upsample': -1,
-        'use_scale_shift_norm': True,
+        'use_scale_shift_norm': True  # <--- 确保这里是 True
     }
     
     # 扩散配置
@@ -412,12 +426,17 @@ def create_vae_ldm(
         'rescale_timesteps': True,
     }
     
+    # <<<< 新增：定义计算出的缩放因子 >>>>
+    calculated_latent_scale_factor = 0.0616 # 基于之前的统计数据
+    # <<<< 结束新增 >>>>
+
     model = VAELatentDiffusionModel(
         vae_config=vae_config,
-        unet_config=unet_config,
+        unet_config=unet_params_for_model,
         diffusion_config=diffusion_config,
         vae_checkpoint_path=vae_checkpoint_path,
-        device=device
+        device=device,
+        latent_scale_factor=calculated_latent_scale_factor # <--- 传递缩放因子
     )
     
     return model 
