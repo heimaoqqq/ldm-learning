@@ -1,0 +1,56 @@
+# LDM Training Configuration
+# 基于CompVis/latent-diffusion的潜在扩散模型训练配置
+
+# 数据配置
+data:
+  data_dir: "/kaggle/input/dataset/dataset"  # 数据集路径
+  batch_size: 8                              # 批次大小（保守设置，避免OOM）
+  num_workers: 2                             # 数据加载线程数
+  image_size: 256                            # 图像尺寸（匹配VAE训练）
+
+# U-Net模型配置
+unet:
+  in_channels: 4                             # 输入通道数（AutoencoderKL的潜变量）
+  out_channels: 4                            # 输出通道数（预测的噪音）
+  model_channels: 320                        # 基础通道数（参考Stable Diffusion）
+  num_res_blocks: 2                          # 每个分辨率级别的残差块数
+  attention_resolutions: [4, 2, 1]           # 使用注意力的分辨率级别
+  channel_mult: [1, 2, 4, 4]                # 通道倍数
+  num_classes: 31                            # 类别数量（微多普勒信号分类）
+  dropout: 0.1                               # Dropout概率
+  num_heads: 8                               # 注意力头数
+  use_scale_shift_norm: true                 # 使用缩放偏移归一化
+  resblock_updown: true                      # 残差块中使用上下采样
+
+# 扩散过程配置
+diffusion:
+  timesteps: 1000                            # 扩散时间步数
+  beta_schedule: "cosine"                    # beta调度类型（cosine/linear）
+  beta_start: 0.0001                         # beta起始值
+  beta_end: 0.02                             # beta结束值
+
+# 训练配置
+training:
+  epochs: 50                                 # 训练轮次
+  learning_rate: 1e-4                       # 初始学习率
+  weight_decay: 0.01                         # 权重衰减
+  scheduler: "cosine"                        # 学习率调度器（cosine/step/none）
+  min_lr: 1e-6                               # 最小学习率
+  gradient_clip: 1.0                         # 梯度裁剪阈值
+
+# 评估和采样配置
+evaluation:
+  sample_every_epochs: 5                     # 每隔几个epoch生成样本
+  num_sample_images: 4                       # 生成样本图像数量
+  inference_steps: 50                        # 推理步数
+  guidance_scale: 1.0                        # 分类器自由引导强度
+
+# 输出配置
+output_dir: "./ldm_outputs"                  # 输出目录
+save_every_epochs: 10                       # 每隔几个epoch保存检查点
+
+# 内存优化配置
+optimization:
+  mixed_precision: false                     # 混合精度训练（VAE已处理dtype问题）
+  gradient_accumulation: 1                   # 梯度累积步数
+  memory_efficient_attention: true           # 内存高效注意力 
