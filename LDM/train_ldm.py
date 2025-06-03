@@ -232,7 +232,8 @@ class FIDEvaluator:
             with torch.no_grad():
                 num_batches = (num_samples + batch_size - 1) // batch_size
                 
-                for i in tqdm(range(num_batches), desc="生成图像"):
+                # 简化进度条显示，不显示具体描述只显示总体进度
+                for i in range(num_batches):
                     current_batch_size = min(batch_size, num_samples - i * batch_size)
                     
                     # 随机生成类别标签
@@ -254,6 +255,10 @@ class FIDEvaluator:
                     generated_images = torch.clamp(generated_images, 0.0, 1.0)
                     
                     fake_images.append(generated_images.cpu())  # 立即移到CPU
+                    
+                    # 简化进度显示
+                    if (i + 1) % max(1, num_batches // 4) == 0 or i == num_batches - 1:
+                        print(f"   📊 已生成 {(i + 1) * batch_size}/{num_samples} 张图像...")
                     
                     # 清理显存
                     del generated_images
@@ -624,6 +629,9 @@ class LDMTrainer:
         total_loss = 0.0
         num_batches = len(self.train_loader)
         
+        # 获取总epoch数
+        total_epochs = self.config.get('training', {}).get('epochs', 100)
+        
         # 从配置读取详细监控设置
         monitoring_config = self.config.get('training', {}).get('detailed_monitoring', {})
         detailed_monitoring = (
@@ -643,8 +651,10 @@ class LDMTrainer:
         
         progress_bar = tqdm(
             self.train_loader,
-            desc=f"Epoch {epoch+1} - Training",
-            leave=False
+            desc=f"Epoch {epoch+1}/{total_epochs}",
+            leave=False,
+            ncols=80,  # 限制进度条宽度
+            ascii=True  # 使用ASCII字符，避免编码问题
         )
         
         for batch_idx, batch in enumerate(progress_bar):
@@ -887,10 +897,15 @@ class LDMTrainer:
         total_loss = 0.0
         num_batches = len(self.val_loader)
         
+        # 获取总epoch数
+        total_epochs = self.config.get('training', {}).get('epochs', 100)
+        
         progress_bar = tqdm(
             self.val_loader,
-            desc=f"Epoch {epoch+1} - Validation",
-            leave=False
+            desc=f"Validation {epoch+1}/{total_epochs}",
+            leave=False,
+            ncols=80,
+            ascii=True
         )
         
         for batch_idx, batch in enumerate(progress_bar):
@@ -970,7 +985,7 @@ class LDMTrainer:
             return float('inf')
     
     @torch.no_grad()
-    def generate_samples(self, epoch: int, num_samples: int = 4):
+    def generate_samples(self, epoch: int, num_samples: int = 8):
         """生成样本图像"""
         self.model.eval()
         
@@ -984,6 +999,8 @@ class LDMTrainer:
         else:
             class_labels = None
         
+        print(f"🎨 生成 {num_samples} 张样本图像...")
+        
         # 生成图像
         generated_images = self.model.sample(
             num_samples=num_samples,
@@ -996,17 +1013,16 @@ class LDMTrainer:
         generated_images = (generated_images + 1.0) / 2.0
         generated_images = torch.clamp(generated_images, 0.0, 1.0)
         
-        # 保存图像
-        fig, axes = plt.subplots(1, num_samples, figsize=(num_samples * 3, 3))
-        if num_samples == 1:
-            axes = [axes]
+        # 保存图像 - 使用2x4布局
+        fig, axes = plt.subplots(2, 4, figsize=(12, 6))
+        axes = axes.flatten()
         
         for i in range(num_samples):
             img = generated_images[i].cpu().permute(1, 2, 0).numpy()
             axes[i].imshow(img)
             axes[i].axis('off')
             if class_labels is not None:
-                axes[i].set_title(f'Class {class_labels[i].item()}')
+                axes[i].set_title(f'类别 {class_labels[i].item()}', fontsize=10)
         
         plt.tight_layout()
         sample_path = os.path.join(self.output_dir, 'samples', f'epoch_{epoch+1:03d}.png')
@@ -1123,17 +1139,22 @@ class LDMTrainer:
         
         # 检查并计算VAE缩放因子
         if start_epoch == 0:  # 只在训练开始时检查
-            print("\n🔍 检查VAE缩放因子...")
+            print("\n" + "="*60)
+            print("🔍 VAE缩放因子检查与验证")
+            print("="*60)
+            
             optimal_scaling_factor = self.compute_vae_scaling_factor()
             
             current_factor = self.model.scaling_factor
             factor_diff = abs(optimal_scaling_factor - current_factor) / current_factor
             
+            print(f"\n📊 缩放因子分析:")
+            print(f"   当前缩放因子: {current_factor:.6f}")
+            print(f"   建议缩放因子: {optimal_scaling_factor:.6f}")
+            print(f"   相对差异: {factor_diff*100:.1f}%")
+            
             if factor_diff > 0.1:  # 差异超过10%
-                print(f"\n❓ 是否更新缩放因子?")
-                print(f"   当前: {current_factor:.6f}")
-                print(f"   建议: {optimal_scaling_factor:.6f}")
-                print(f"   差异: {factor_diff*100:.1f}%")
+                print(f"\n⚠️  缩放因子差异较大，建议更新")
                 
                 # 自动更新缩放因子（也可以手动确认）
                 auto_update = train_config.get('auto_update_scaling_factor', True)
@@ -1143,15 +1164,15 @@ class LDMTrainer:
                     self.model.scaling_factor = optimal_scaling_factor
                     print(f"✅ 缩放因子已更新: {old_factor:.6f} → {optimal_scaling_factor:.6f}")
                     
-                    # 验证更新是否成功
-                    print(f"🔍 验证更新结果:")
+                    # 验证更新效果
+                    print(f"\n🔬 验证更新效果:")
                     with torch.no_grad():
                         # 测试一个小批次的编码
                         test_batch = next(iter(self.train_loader))
                         if isinstance(test_batch, (list, tuple)):
-                            test_images = test_batch[0][:2]  # 只取2张图片
+                            test_images = test_batch[0][:4]  # 取4张图片测试
                         else:
-                            test_images = test_batch[:2]
+                            test_images = test_batch[:4]
                         
                         test_images = test_images.to(self.device)
                         posterior = self.vae_model.encode(test_images)
@@ -1159,16 +1180,22 @@ class LDMTrainer:
                         
                         test_mean = test_latents.mean().item()
                         test_std = test_latents.std().item()
-                        print(f"   测试编码结果: 均值={test_mean:.4f}, 标准差={test_std:.4f}")
+                        print(f"   编码测试结果: 均值={test_mean:.4f}, 标准差={test_std:.4f}")
                         
                         if 0.8 <= test_std <= 1.2:
-                            print(f"   ✅ 缩放效果验证通过")
+                            print(f"   ✅ 缩放效果良好 (标准差接近1.0)")
+                        elif test_std < 0.8:
+                            print(f"   ⚠️  标准差偏小 ({test_std:.4f})，可能影响生成质量")
                         else:
-                            print(f"   ⚠️  缩放效果可能有问题，标准差={test_std:.4f} (期望: ~1.0)")
+                            print(f"   ⚠️  标准差偏大 ({test_std:.4f})，可能影响训练稳定性")
                 else:
                     print(f"⚠️  建议手动更新配置中的缩放因子")
+            else:
+                print(f"✅ 缩放因子合适，无需更新")
             
-            print(f"✅ 缩放因子检查完成\n")
+            print("="*60)
+            print("✅ 缩放因子检查完成，开始训练...")
+            print("="*60 + "\n")
         
         for epoch in range(start_epoch, epochs):
             print(f"\n📅 Epoch {epoch + 1}/{epochs}")
@@ -1223,7 +1250,7 @@ class LDMTrainer:
             
             # 生成样本（根据配置）
             if (epoch + 1) % sample_config.get('sample_every_epochs', 5) == 0:
-                num_samples = sample_config.get('num_sample_images', 4)
+                num_samples = sample_config.get('num_sample_images', 8)
                 self.generate_samples(epoch, num_samples)
             
             # 清理显存
