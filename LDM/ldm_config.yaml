@@ -43,11 +43,12 @@ evaluation:
   # FID评估配置
   fid_evaluation:
     enabled: true                              # 是否启用FID评估
-    eval_every_epochs: 1                       # 每隔几个epoch评估一次
-    num_samples: 1000                          # 用于FID评估的样本数量
-    batch_size: 32                             # FID评估时的批次大小
-    inception_batch_size: 64                   # Inception模型的批次大小
+    eval_every_epochs: 5                       # 每隔几个epoch评估一次
+    num_samples: 500                           # 用于FID评估的样本数量（减少以节省内存）
+    batch_size: 16                             # FID评估时的批次大小（减少以节省内存）
+    inception_batch_size: 16                   # Inception模型的批次大小（减少以节省内存）
     num_inference_steps: 50                    # 生成样本时的推理步数
+    # 低内存模式建议: num_samples: 200, batch_size: 8, inception_batch_size: 8
     
   # 常规样本生成配置
   sample_generation:
