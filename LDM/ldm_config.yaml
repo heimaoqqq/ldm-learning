@@ -40,10 +40,22 @@ training:
 
 # 评估和采样配置
 evaluation:
-  sample_every_epochs: 5                     # 每隔几个epoch生成样本
-  num_sample_images: 4                       # 生成样本图像数量
-  inference_steps: 50                        # 推理步数
-  guidance_scale: 1.0                        # 分类器自由引导强度
+  # FID评估配置
+  fid_evaluation:
+    enabled: true                              # 是否启用FID评估
+    eval_every_epochs: 1                       # 每隔几个epoch评估一次
+    num_samples: 1000                          # 用于FID评估的样本数量
+    batch_size: 32                             # FID评估时的批次大小
+    inception_batch_size: 64                   # Inception模型的批次大小
+    num_inference_steps: 50                    # 生成样本时的推理步数
+    
+  # 常规样本生成配置
+  sample_generation:
+    sample_every_epochs: 5                     # 每隔几个epoch生成样本
+    num_sample_images: 4                       # 生成样本图像数量
+    inference_steps: 50                        # 推理步数
+    guidance_scale: 1.0                        # 分类器自由引导强度
+    save_individual: true                      # 是否保存单独的样本图像
 
 # 输出配置
 output_dir: "./ldm_outputs"                  # 输出目录
@@ -53,4 +65,13 @@ save_every_epochs: 10                       # 每隔几个epoch保存检查点
 optimization:
   mixed_precision: false                     # 混合精度训练（VAE已处理dtype问题）
   gradient_accumulation: 1                   # 梯度累积步数
-  memory_efficient_attention: true           # 内存高效注意力 
+  memory_efficient_attention: true           # 内存高效注意力
+  
+# 数据归一化配置
+data_normalization:
+  # 图像归一化范围（输入到VAE的图像）
+  image_range: [-1, 1]                       # VAE训练时使用的归一化范围
+  # 潜变量范围（VAE输出的潜变量）
+  latent_range: [-4, 4]                      # 潜变量的典型范围
+  # FID评估时的图像范围
+  fid_image_range: [0, 1]                    # FID评估要求的图像范围 
