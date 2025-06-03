@@ -547,6 +547,77 @@ class LDMTrainer:
         print(f"   验证集: {len(val_dataset)} 样本, {len(self.val_loader)} 批次")
         print(f"   类别数: {num_classes}")
 
+    @torch.no_grad()
+    def compute_vae_scaling_factor(self, num_samples: int = 1000) -> float:
+        """
+        计算微调后VAE的最佳缩放因子
+        
+        Args:
+            num_samples: 用于统计的样本数量
+            
+        Returns:
+            optimal_scaling_factor: 最佳缩放因子
+        """
+        print(f"🔍 计算VAE缩放因子 (使用 {num_samples} 个样本)...")
+        
+        self.vae_model.eval()
+        latent_samples = []
+        
+        # 收集潜变量样本
+        sample_count = 0
+        for batch_idx, batch in enumerate(self.train_loader):
+            if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+                images = batch[0]
+            else:
+                images = batch
+            
+            images = images.to(self.device)
+            
+            # 使用VAE编码（不应用缩放因子）
+            with torch.amp.autocast(device_type='cuda', enabled=False):
+                images = images.float()
+                latent_dist = self.vae_model.encode(images).latent_dist
+                latents = latent_dist.sample()  # 原始潜变量，未缩放
+            
+            latent_samples.append(latents.cpu())
+            sample_count += latents.shape[0]
+            
+            if sample_count >= num_samples:
+                break
+        
+        if not latent_samples:
+            print("⚠️  无法收集潜变量样本，使用默认缩放因子")
+            return 0.18215
+        
+        # 合并所有样本
+        all_latents = torch.cat(latent_samples, dim=0)[:num_samples]
+        
+        # 计算统计信息
+        mean = all_latents.mean()
+        std = all_latents.std()
+        
+        # 最佳缩放因子 = 1 / std
+        # 目标是使缩放后的潜变量标准差接近1
+        optimal_scaling_factor = 1.0 / std.item()
+        
+        print(f"📊 VAE潜变量统计:")
+        print(f"   样本数量: {len(all_latents)}")
+        print(f"   均值: {mean:.6f}")
+        print(f"   标准差: {std:.6f}")
+        print(f"   建议缩放因子: {optimal_scaling_factor:.6f}")
+        print(f"   当前缩放因子: {self.model.scaling_factor:.6f}")
+        
+        # 检查是否需要更新
+        current_factor = self.model.scaling_factor
+        factor_diff = abs(optimal_scaling_factor - current_factor) / current_factor
+        
+        if factor_diff > 0.1:  # 差异超过10%
+            print(f"⚠️  缩放因子差异较大 ({factor_diff*100:.1f}%)，建议更新")
+        else:
+            print(f"✅ 缩放因子差异较小 ({factor_diff*100:.1f}%)，当前设置合适")
+        
+        return optimal_scaling_factor
+
     def train_epoch(self, epoch: int) -> float:
         """训练一个epoch"""
         self.model.train()
@@ -842,6 +913,31 @@ class LDMTrainer:
         print(f"   总轮次: {epochs}")
         print(f"   起始轮次: {start_epoch + 1}")
         print(f"   输出目录: {self.output_dir}")
+        
+        # 检查并计算VAE缩放因子
+        if start_epoch == 0:  # 只在训练开始时检查
+            print("\n🔍 检查VAE缩放因子...")
+            optimal_scaling_factor = self.compute_vae_scaling_factor()
+            
+            current_factor = self.model.scaling_factor
+            factor_diff = abs(optimal_scaling_factor - current_factor) / current_factor
+            
+            if factor_diff > 0.1:  # 差异超过10%
+                print(f"\n❓ 是否更新缩放因子?")
+                print(f"   当前: {current_factor:.6f}")
+                print(f"   建议: {optimal_scaling_factor:.6f}")
+                print(f"   差异: {factor_diff*100:.1f}%")
+                
+                # 自动更新缩放因子（也可以手动确认）
+                auto_update = train_config.get('auto_update_scaling_factor', True)
+                if auto_update:
+                    print(f"🔄 自动更新缩放因子...")
+                    self.model.scaling_factor = optimal_scaling_factor
+                    print(f"✅ 缩放因子已更新为: {optimal_scaling_factor:.6f}")
+                else:
+                    print(f"⚠️  建议手动更新配置中的缩放因子")
+            
+            print(f"✅ 缩放因子检查完成\n")
         
         for epoch in range(start_epoch, epochs):
             print(f"\n📅 Epoch {epoch + 1}/{epochs}")
