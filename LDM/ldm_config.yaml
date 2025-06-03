@@ -42,9 +42,9 @@ training:
   # 详细数值监控配置（用于调试和验证）
   detailed_monitoring:
     enabled: true                            # 是否启用详细监控
-    monitor_epochs: 5                        # 只监控前3个epoch（减少输出）
-    monitor_batches: 3                       # 每个epoch监控前2个批次（减少输出）
-    summary_interval: 300                    # 每200个批次输出一次摘要（减少输出）
+    monitor_epochs: 5                        # 只监控前5个epoch（减少输出）
+    monitor_batches: 3                       # 每个epoch监控前3个批次（减少输出）
+    summary_interval: 300                    # 每300个批次输出一次摘要（减少输出）
     check_scaling_factor: true               # 是否检查缩放因子效果
 
 # 评估和采样配置
