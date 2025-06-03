@@ -220,20 +220,15 @@ class LDMDiffusion:
         alpha_cumprod_t = self.extract(self.alphas_cumprod, t, x_t.shape)
         
         # 计算前一个时间步
-        # 修复：正确计算前一个时间步
         prev_timestep = t - 1
         prev_timestep = torch.clamp(prev_timestep, 0)
         
-        # 获取前一个时间步的alpha，处理t=0的情况
-        alpha_cumprod_t_prev = torch.where(
-            prev_timestep >= 0,
-            self.alphas_cumprod.gather(0, prev_timestep.clamp(0)),
-            torch.ones_like(alpha_cumprod_t.squeeze())
-        ).view_as(alpha_cumprod_t)
+        # 获取前一个时间步的alpha，使用extract方法确保正确的维度
+        alpha_cumprod_t_prev = self.extract(self.alphas_cumprod, prev_timestep, x_t.shape)
         
         # 当t=0时，前一步应该是完全无噪音的
         alpha_cumprod_t_prev = torch.where(
-            t == 0,
+            t.view(-1, 1, 1, 1) == 0,  # 确保维度匹配
             torch.ones_like(alpha_cumprod_t),
             alpha_cumprod_t_prev
         )
