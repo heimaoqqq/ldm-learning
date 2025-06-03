@@ -4,7 +4,7 @@
 # 数据配置
 data:
   data_dir: "/kaggle/input/dataset/dataset"  # 数据集路径
-  batch_size: 8                              # 批次大小（保守设置，避免OOM）
+  batch_size: 6                              # 批次大小（保守设置，避免OOM）
   num_workers: 2                             # 数据加载线程数
   image_size: 256                            # 图像尺寸（匹配VAE训练）
 
@@ -32,10 +32,10 @@ diffusion:
 # 训练配置
 training:
   epochs: 50                                 # 训练轮次
-  learning_rate: 0.0001                       # 初始学习率
+  learning_rate: 0.0001                     # 初始学习率
   weight_decay: 0.01                         # 权重衰减
   scheduler: "cosine"                        # 学习率调度器（cosine/step/none）
-  min_lr: 1e-6                               # 最小学习率
+  min_lr: 0.000001                          # 最小学习率
   gradient_clip: 1.0                         # 梯度裁剪阈值
 
 # 评估和采样配置
