@@ -691,11 +691,11 @@ class LDMTrainer:
                             
                             # 生成随机噪音时间步
                             batch_size = latents.shape[0]
-                            timesteps = torch.randint(0, self.model.scheduler.num_train_timesteps, (batch_size,), device=self.device)
+                            timesteps = torch.randint(0, self.model.diffusion.timesteps, (batch_size,), device=self.device)
                             
                             # 添加噪音
                             noise = torch.randn_like(latents)
-                            noisy_latents = self.model.scheduler.add_noise(latents, noise, timesteps)
+                            noisy_latents = self.model.diffusion.q_sample(latents, timesteps, noise)
                             
                             # 统计噪音和加噪后的潜变量
                             noise_min, noise_max = noise.min().item(), noise.max().item()
@@ -712,7 +712,7 @@ class LDMTrainer:
                             print(f"    加噪潜变量: 范围[{noisy_min:.3f}, {noisy_max:.3f}], 均值{noisy_mean:.3f}, 标准差{noisy_std:.3f}")
                             
                             # U-Net预测
-                            model_pred = self.model.unet(noisy_latents, timesteps, class_labels).sample
+                            model_pred = self.model.unet(noisy_latents, timesteps, class_labels)
                             pred_min, pred_max = model_pred.min().item(), model_pred.max().item()
                             pred_mean, pred_std = model_pred.mean().item(), model_pred.std().item()
                             pred_stats['min'].append(pred_min)
