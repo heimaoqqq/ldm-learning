@@ -50,6 +50,26 @@ torch.backends.cudnn.benchmark = True
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 
+class DataLoaderWrapper:
+    """数据加载器包装器，将VAE的(image, label)格式适配为LDM需要的格式"""
+    
+    def __init__(self, original_loader):
+        self.original_loader = original_loader
+        self.batch_size = original_loader.batch_size
+        self.dataset = original_loader.dataset
+    
+    def __iter__(self):
+        for batch in self.original_loader:
+            if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+                images, labels = batch[0], batch[1]
+                yield images, labels
+            else:
+                raise ValueError(f"无法处理的批次格式: {type(batch)}")
+    
+    def __len__(self):
+        return len(self.original_loader)
+
+
 class LDMTrainer:
     """LDM训练器"""
     
@@ -249,26 +269,6 @@ class LDMTrainer:
         print(f"   验证集: {len(val_dataset)} 样本, {len(self.val_loader)} 批次")
         print(f"   类别数: {num_classes}")
 
-
-class DataLoaderWrapper:
-    """数据加载器包装器，将VAE的(image, label)格式适配为LDM需要的格式"""
-    
-    def __init__(self, original_loader):
-        self.original_loader = original_loader
-        self.batch_size = original_loader.batch_size
-        self.dataset = original_loader.dataset
-    
-    def __iter__(self):
-        for batch in self.original_loader:
-            if isinstance(batch, (list, tuple)) and len(batch) >= 2:
-                images, labels = batch[0], batch[1]
-                yield images, labels
-            else:
-                raise ValueError(f"无法处理的批次格式: {type(batch)}")
-    
-    def __len__(self):
-        return len(self.original_loader)
-    
     def train_epoch(self, epoch: int) -> float:
         """训练一个epoch"""
         self.model.train()
