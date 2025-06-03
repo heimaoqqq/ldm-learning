@@ -547,6 +547,7 @@ def main():
     
     # 查找VAE检查点
     possible_vae_paths = [
+        "/kaggle/input/vae-model/vae_finetuned_epoch_23.pth",  # 用户提供的预训练模型
         "VAE/vae_model_best.pth",
         "VAE/vae_model_final.pth",
         "VAE/checkpoints/best_vae_checkpoint.pth",
