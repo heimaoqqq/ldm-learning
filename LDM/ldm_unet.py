@@ -143,7 +143,7 @@ class AttentionBlock(nn.Module):
         attn = torch.softmax(attn, dim=-1)
         
         out = torch.einsum('bhnm,bhcm->bhcn', attn, v)
-        out = out.view(batch_size, channels, height * width)
+        out = out.contiguous().view(batch_size, channels, height * width)
         
         out = self.proj_out(out)
         out = out.view(batch_size, channels, height, width)
