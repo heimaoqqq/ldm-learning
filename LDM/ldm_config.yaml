@@ -42,9 +42,9 @@ training:
   # 详细数值监控配置（用于调试和验证）
   detailed_monitoring:
     enabled: true                            # 是否启用详细监控
-    monitor_epochs: 10                       # 监控前N个epoch
-    monitor_batches: 5                       # 每个epoch监控前N个批次
-    summary_interval: 50                     # 每N个批次输出一次摘要
+    monitor_epochs: 10                        # 监控前10个epoch（减少输出）
+    monitor_batches: 3                       # 每个epoch监控前3个批次（减少输出）
+    summary_interval: 200                    # 每200个批次输出一次摘要（减少输出）
     check_scaling_factor: true               # 是否检查缩放因子效果
 
 # 评估和采样配置
@@ -52,12 +52,12 @@ evaluation:
   # FID评估配置
   fid_evaluation:
     enabled: true                              # 是否启用FID评估
-    eval_every_epochs: 1                       # 每隔几个epoch评估一次
-    num_samples: 500                           # 用于FID评估的样本数量（减少以节省内存）
-    batch_size: 16                             # FID评估时的批次大小（减少以节省内存）
-    inception_batch_size: 16                   # Inception模型的批次大小（减少以节省内存）
-    num_inference_steps: 50                    # 生成样本时的推理步数
-    # 低内存模式建议: num_samples: 200, batch_size: 8, inception_batch_size: 8
+    eval_every_epochs: 1                      # 每隔10个epoch评估一次（减少频率）
+    num_samples: 100                           # 用于FID评估的样本数量（大幅减少）
+    batch_size: 8                              # FID评估时的批次大小（减少）
+    inception_batch_size: 8                    # Inception模型的批次大小（减少）
+    num_inference_steps: 50                    # 生成样本时的推理步数（减少加速）
+    # 低内存模式建议: num_samples: 50, batch_size: 4, inception_batch_size: 4
     
   # 常规样本生成配置
   sample_generation:
