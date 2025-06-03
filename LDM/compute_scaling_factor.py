@@ -5,57 +5,359 @@
 import os
 import sys
 import torch
+import torch.nn as nn
 import numpy as np
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
+from PIL import Image
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-import yaml
+import json
+from typing import List, Tuple, Optional, Union
 
-# 导入VAE模型
-sys.path.append('../VAE')
-try:
-    from vae_model import AutoencoderKL
-    from dataset import build_dataloader as vae_build_dataloader
-    print("✅ 成功导入VAE相关模块")
-except ImportError as e:
-    print(f"❌ 导入VAE模块失败: {e}")
-    sys.exit(1)
+# 设置设备
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f"🖥️  使用设备: {device}")
 
-def load_vae_model(checkpoint_path: str, device: str = 'cuda') -> AutoencoderKL:
-    """加载VAE模型"""
-    print(f"🔧 加载VAE模型: {checkpoint_path}")
-    
-    # 创建VAE模型
-    vae = AutoencoderKL(
+# ==================== VAE模型定义 ====================
+# 直接在脚本中定义VAE模型，避免导入问题
+
+class ResnetBlock(nn.Module):
+    def __init__(self, in_channels, out_channels=None, dropout=0.0, groups=32):
+        super().__init__()
+        self.in_channels = in_channels
+        out_channels = in_channels if out_channels is None else out_channels
+        self.out_channels = out_channels
+        
+        self.norm1 = nn.GroupNorm(groups, in_channels)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        
+        self.norm2 = nn.GroupNorm(groups, out_channels)
+        self.dropout = nn.Dropout(dropout)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        
+        if self.in_channels != self.out_channels:
+            self.nin_shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+        else:
+            self.nin_shortcut = None
+
+    def forward(self, x):
+        h = x
+        h = self.norm1(h)
+        h = torch.nn.functional.silu(h)
+        h = self.conv1(h)
+
+        h = self.norm2(h)
+        h = torch.nn.functional.silu(h)
+        h = self.dropout(h)
+        h = self.conv2(h)
+
+        if self.nin_shortcut is not None:
+            x = self.nin_shortcut(x)
+
+        return x + h
+
+class Downsample(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv = nn.Conv2d(channels, channels, kernel_size=3, stride=2, padding=1)
+
+    def forward(self, x):
+        return self.conv(x)
+
+class Upsample(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, x):
+        x = torch.nn.functional.interpolate(x, scale_factor=2.0, mode='nearest')
+        return self.conv(x)
+
+class DownEncoderBlock2D(nn.Module):
+    def __init__(self, in_channels, out_channels, num_layers=1, add_downsample=True):
+        super().__init__()
+        self.resnets = nn.ModuleList([])
+        for i in range(num_layers):
+            in_ch = in_channels if i == 0 else out_channels
+            self.resnets.append(ResnetBlock(in_ch, out_channels))
+        
+        self.downsamplers = None
+        if add_downsample:
+            self.downsamplers = nn.ModuleList([Downsample(out_channels)])
+
+    def forward(self, hidden_states):
+        for resnet in self.resnets:
+            hidden_states = resnet(hidden_states)
+        
+        if self.downsamplers is not None:
+            for downsampler in self.downsamplers:
+                hidden_states = downsampler(hidden_states)
+        
+        return hidden_states
+
+class UpDecoderBlock2D(nn.Module):
+    def __init__(self, in_channels, out_channels, num_layers=1, add_upsample=True):
+        super().__init__()
+        self.resnets = nn.ModuleList([])
+        for i in range(num_layers):
+            in_ch = in_channels if i == 0 else out_channels
+            self.resnets.append(ResnetBlock(in_ch, out_channels))
+        
+        self.upsamplers = None
+        if add_upsample:
+            self.upsamplers = nn.ModuleList([Upsample(out_channels)])
+
+    def forward(self, hidden_states):
+        for resnet in self.resnets:
+            hidden_states = resnet(hidden_states)
+        
+        if self.upsamplers is not None:
+            for upsampler in self.upsamplers:
+                hidden_states = upsampler(hidden_states)
+        
+        return hidden_states
+
+class DiagonalGaussianDistribution:
+    def __init__(self, parameters, deterministic=False):
+        self.parameters = parameters
+        self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
+        self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
+        self.deterministic = deterministic
+        self.std = torch.exp(0.5 * self.logvar)
+        self.var = torch.exp(self.logvar)
+
+    def sample(self):
+        if self.deterministic:
+            return self.mean
+        else:
+            return self.mean + self.std * torch.randn_like(self.mean)
+
+    def kl(self, other=None):
+        if self.deterministic:
+            return torch.Tensor([0.])
+        else:
+            if other is None:
+                return 0.5 * torch.sum(torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar, dim=[1, 2, 3])
+            else:
+                return 0.5 * torch.sum(
+                    torch.pow(self.mean - other.mean, 2) / other.var + 
+                    self.var / other.var - 1.0 - self.logvar + other.logvar,
+                    dim=[1, 2, 3])
+
+    def mode(self):
+        return self.mean
+
+class Encoder(nn.Module):
+    def __init__(
+        self,
+        in_channels=3,
+        out_channels=4,
+        down_block_types=["DownEncoderBlock2D"],
+        block_out_channels=[128],
+        layers_per_block=2,
+        norm_num_groups=32,
+        double_z=True,
+    ):
+        super().__init__()
+        self.layers_per_block = layers_per_block
+
+        self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], kernel_size=3, stride=1, padding=1)
+
+        self.down_blocks = nn.ModuleList([])
+
+        # down
+        output_channel = block_out_channels[0]
+        for i, down_block_type in enumerate(down_block_types):
+            input_channel = output_channel
+            output_channel = block_out_channels[i]
+            is_final_block = i == len(block_out_channels) - 1
+
+            down_block = DownEncoderBlock2D(
+                in_channels=input_channel,
+                out_channels=output_channel,
+                num_layers=self.layers_per_block,
+                add_downsample=not is_final_block,
+            )
+            self.down_blocks.append(down_block)
+
+        # mid
+        self.mid_block = ResnetBlock(block_out_channels[-1], block_out_channels[-1])
+
+        # end
+        self.conv_norm_out = nn.GroupNorm(norm_num_groups, block_out_channels[-1])
+        conv_out_channels = 2 * out_channels if double_z else out_channels
+        self.conv_out = nn.Conv2d(block_out_channels[-1], conv_out_channels, 3, padding=1)
+
+    def forward(self, x):
+        sample = x
+        sample = self.conv_in(sample)
+
+        for down_block in self.down_blocks:
+            sample = down_block(sample)
+
+        sample = self.mid_block(sample)
+
+        sample = self.conv_norm_out(sample)
+        sample = torch.nn.functional.silu(sample)
+        sample = self.conv_out(sample)
+
+        return sample
+
+class Decoder(nn.Module):
+    def __init__(
+        self,
+        in_channels=4,
+        out_channels=3,
+        up_block_types=["UpDecoderBlock2D"],
+        block_out_channels=[128],
+        layers_per_block=2,
+        norm_num_groups=32,
+    ):
+        super().__init__()
+        self.layers_per_block = layers_per_block
+
+        self.conv_in = nn.Conv2d(in_channels, block_out_channels[-1], kernel_size=3, stride=1, padding=1)
+
+        self.mid_block = ResnetBlock(block_out_channels[-1], block_out_channels[-1])
+
+        self.up_blocks = nn.ModuleList([])
+
+        reversed_block_out_channels = list(reversed(block_out_channels))
+        output_channel = reversed_block_out_channels[0]
+        for i, up_block_type in enumerate(up_block_types):
+            prev_output_channel = output_channel
+            output_channel = reversed_block_out_channels[i]
+            is_final_block = i == len(block_out_channels) - 1
+
+            up_block = UpDecoderBlock2D(
+                in_channels=prev_output_channel,
+                out_channels=output_channel,
+                num_layers=self.layers_per_block + 1,
+                add_upsample=not is_final_block,
+            )
+            self.up_blocks.append(up_block)
+            prev_output_channel = output_channel
+
+        self.conv_norm_out = nn.GroupNorm(norm_num_groups, block_out_channels[0])
+        self.conv_out = nn.Conv2d(block_out_channels[0], out_channels, 3, padding=1)
+
+    def forward(self, z):
+        sample = z
+        sample = self.conv_in(sample)
+
+        sample = self.mid_block(sample)
+
+        for up_block in self.up_blocks:
+            sample = up_block(sample)
+
+        sample = self.conv_norm_out(sample)
+        sample = torch.nn.functional.silu(sample)
+        sample = self.conv_out(sample)
+
+        return sample
+
+class AutoencoderKL(nn.Module):
+    def __init__(
+        self,
         in_channels=3,
         out_channels=3,
         latent_channels=4,
-        down_block_types=['DownEncoderBlock2D'] * 4,
-        up_block_types=['UpDecoderBlock2D'] * 4,
+        down_block_types=["DownEncoderBlock2D"] * 4,
+        up_block_types=["UpDecoderBlock2D"] * 4,
         block_out_channels=[128, 256, 512, 512],
         layers_per_block=2,
         norm_num_groups=32,
-        sample_size=256
+        sample_size=256,
+    ):
+        super().__init__()
+
+        self.encoder = Encoder(
+            in_channels=in_channels,
+            out_channels=latent_channels,
+            down_block_types=down_block_types,
+            block_out_channels=block_out_channels,
+            layers_per_block=layers_per_block,
+            norm_num_groups=norm_num_groups,
+        )
+
+        self.decoder = Decoder(
+            in_channels=latent_channels,
+            out_channels=out_channels,
+            up_block_types=up_block_types,
+            block_out_channels=block_out_channels,
+            layers_per_block=layers_per_block,
+            norm_num_groups=norm_num_groups,
+        )
+
+        self.quant_conv = nn.Conv2d(2 * latent_channels, 2 * latent_channels, 1)
+        self.post_quant_conv = nn.Conv2d(latent_channels, latent_channels, 1)
+
+    def encode(self, x):
+        h = self.encoder(x)
+        moments = self.quant_conv(h)
+        posterior = DiagonalGaussianDistribution(moments)
+        return posterior
+
+    def decode(self, z):
+        z = self.post_quant_conv(z)
+        dec = self.decoder(z)
+        return dec
+
+    def forward(self, sample):
+        x = sample
+        posterior = self.encode(x)
+        z = posterior.sample()
+        dec = self.decode(z)
+        return dec, posterior
+
+# ==================== 数据加载器 ====================
+
+class ImageDataset(Dataset):
+    """简单的图像数据集类"""
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.image_paths = []
+        
+        # 收集所有图像文件
+        for root, dirs, files in os.walk(root_dir):
+            for file in files:
+                if file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    self.image_paths.append(os.path.join(root, file))
+        
+        print(f"找到 {len(self.image_paths)} 张图像")
+    
+    def __len__(self):
+        return len(self.image_paths)
+    
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        image = Image.open(img_path).convert('RGB')
+        
+        if self.transform:
+            image = self.transform(image)
+        
+        return image
+
+def create_dataloader(data_dir, batch_size=16, num_workers=2):
+    """创建数据加载器"""
+    transform = transforms.Compose([
+        transforms.Resize((256, 256)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # [-1, 1]
+    ])
+    
+    dataset = ImageDataset(data_dir, transform=transform)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
     )
     
-    # 加载检查点
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    
-    # 处理不同的保存格式
-    if 'model_state_dict' in checkpoint:
-        state_dict = checkpoint['model_state_dict']
-    elif 'state_dict' in checkpoint:
-        state_dict = checkpoint['state_dict']
-    else:
-        state_dict = checkpoint
-    
-    vae.load_state_dict(state_dict)
-    vae.eval()
-    vae.to(device)
-    
-    print(f"✅ VAE模型加载成功")
-    return vae
+    return dataloader, len(dataset)
 
 def compute_scaling_factor(
     vae_model,
@@ -240,42 +542,118 @@ def main():
     
     print(f"✅ 找到VAE检查点: {vae_checkpoint_path}")
     
-    # 设备设置
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"🖥️  使用设备: {device}")
-    
     # 加载VAE模型
     try:
-        vae_model = load_vae_model(vae_checkpoint_path, device)
+        print(f"🔧 加载VAE模型: {vae_checkpoint_path}")
+        
+        # 创建VAE模型
+        vae_model = AutoencoderKL(
+            in_channels=3,
+            out_channels=3,
+            latent_channels=4,
+            down_block_types=['DownEncoderBlock2D'] * 4,
+            up_block_types=['UpDecoderBlock2D'] * 4,
+            block_out_channels=[128, 256, 512, 512],
+            layers_per_block=2,
+            norm_num_groups=32,
+            sample_size=256
+        )
+        
+        # 加载检查点
+        checkpoint = torch.load(vae_checkpoint_path, map_location='cpu')
+        
+        # 处理不同的保存格式
+        if 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+            print("✅ 检测到 'model_state_dict' 格式")
+        elif 'state_dict' in checkpoint:
+            state_dict = checkpoint['state_dict']
+            print("✅ 检测到 'state_dict' 格式")
+        else:
+            state_dict = checkpoint
+            print("✅ 检测到直接状态字典格式")
+        
+        # 清理可能的键名前缀
+        new_state_dict = {}
+        for key, value in state_dict.items():
+            if key.startswith('vae.'):
+                new_key = key[4:]  # 移除 'vae.' 前缀
+            elif key.startswith('model.'):
+                new_key = key[6:]  # 移除 'model.' 前缀
+            else:
+                new_key = key
+            new_state_dict[new_key] = value
+        
+        # 加载状态字典
+        missing_keys, unexpected_keys = vae_model.load_state_dict(new_state_dict, strict=False)
+        
+        if missing_keys:
+            print(f"⚠️  缺失的键: {missing_keys[:5]}...")  # 只显示前5个
+        if unexpected_keys:
+            print(f"⚠️  意外的键: {unexpected_keys[:5]}...")  # 只显示前5个
+        
+        vae_model.eval()
+        vae_model.to(device)
+        
+        print(f"✅ VAE模型加载成功")
+        
     except Exception as e:
         print(f"❌ VAE模型加载失败: {e}")
+        import traceback
+        traceback.print_exc()
         return
     
     # 创建数据加载器
     try:
-        data_dir = "/kaggle/input/dataset/dataset"
-        if not os.path.exists(data_dir):
-            data_dir = "dataset"  # 备用路径
+        # Kaggle环境的可能数据路径
+        possible_data_dirs = [
+            "/kaggle/input/dataset/dataset",
+            "/kaggle/input/dataset",
+            "/kaggle/input/data/dataset", 
+            "dataset",
+            "data",
+            "../dataset"
+        ]
         
-        train_loader, val_loader, train_size, val_size = vae_build_dataloader(
-            root_dir=data_dir,
-            batch_size=16,  # 适中的批次大小
-            num_workers=2,
-            shuffle_train=False,  # 不需要打乱，只是统计
-            shuffle_val=False,
-            val_split=0.2,
-            random_state=42
-        )
+        data_dir = None
+        for path in possible_data_dirs:
+            if os.path.exists(path) and os.path.isdir(path):
+                # 检查是否包含图像文件
+                has_images = False
+                for root, dirs, files in os.walk(path):
+                    for file in files:
+                        if file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                            has_images = True
+                            break
+                    if has_images:
+                        break
+                
+                if has_images:
+                    data_dir = path
+                    break
+        
+        if data_dir is None:
+            print("❌ 未找到有效的数据集目录")
+            print("请检查以下路径是否存在且包含图像文件:")
+            for path in possible_data_dirs:
+                exists = "✅" if os.path.exists(path) else "❌"
+                print(f"   {exists} {path}")
+            return
+        
+        print(f"✅ 找到数据集目录: {data_dir}")
+        
+        train_loader, train_size = create_dataloader(data_dir)
         
         print(f"✅ 数据加载器创建成功")
         print(f"   训练集: {train_size} 样本")
-        print(f"   验证集: {val_size} 样本")
         
         # 使用训练集计算缩放因子
         data_loader = train_loader
         
     except Exception as e:
         print(f"❌ 数据加载器创建失败: {e}")
+        import traceback
+        traceback.print_exc()
         return
     
     # 计算缩放因子
@@ -289,7 +667,6 @@ def main():
         )
         
         # 保存结果
-        import json
         with open('vae_scaling_factor_results.json', 'w') as f:
             json.dump(results, f, indent=2)
         
