@@ -58,34 +58,68 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 class FIDEvaluator:
     """FID评估器，用于计算生成图像的FID分数"""
     
-    def __init__(self, device='cuda', inception_batch_size=64):
+    def __init__(self, device='cuda', inception_batch_size=32):  # 减少默认批次大小
         self.device = device
         self.inception_batch_size = inception_batch_size
         
-        # 加载预训练的Inception-v3模型
-        self.inception = models.inception_v3(pretrained=True, transform_input=False)
-        self.inception.fc = nn.Identity()  # 移除最后的分类层
-        self.inception.eval()
-        self.inception.to(device)
+        # Inception模型将在需要时加载，用完就卸载
+        self.inception = None
+        self.preprocess = None
         
-        # 图像预处理（用于Inception-v3）
-        self.preprocess = transforms.Compose([
-            transforms.Resize((299, 299)),  # Inception-v3需要299x299输入
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        
-        print("✅ FID评估器初始化完成")
+        print("✅ FID评估器初始化完成（延迟加载Inception模型）")
+    
+    def _load_inception_model(self):
+        """延迟加载Inception模型"""
+        if self.inception is None:
+            print("🔄 加载Inception-v3模型...")
+            
+            # 清理显存
+            torch.cuda.empty_cache()
+            
+            # 加载预训练的Inception-v3模型
+            self.inception = models.inception_v3(pretrained=True, transform_input=False)
+            self.inception.fc = nn.Identity()  # 移除最后的分类层
+            self.inception.eval()
+            self.inception.to(self.device)
+            
+            # 图像预处理（用于Inception-v3）
+            self.preprocess = transforms.Compose([
+                transforms.Resize((299, 299)),  # Inception-v3需要299x299输入
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+            
+            print("✅ Inception-v3模型加载完成")
+    
+    def _unload_inception_model(self):
+        """卸载Inception模型释放内存"""
+        if self.inception is not None:
+            print("🗑️  卸载Inception-v3模型...")
+            self.inception = None
+            self.preprocess = None
+            torch.cuda.empty_cache()
+            print("✅ Inception-v3模型已卸载")
+    
+    def _check_memory(self, stage=""):
+        """检查GPU内存使用情况"""
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            cached = torch.cuda.memory_reserved() / 1024**3
+            print(f"💾 {stage} GPU内存: 已分配 {allocated:.2f}GB, 缓存 {cached:.2f}GB")
     
     def extract_features(self, images):
         """
         提取图像特征
         输入: [N, 3, H, W] 的RGB图像，范围[0, 1]
         """
+        self._load_inception_model()
         features = []
         
+        # 使用更小的批次大小避免内存问题
+        effective_batch_size = min(self.inception_batch_size, 16)  # 最大16
+        
         with torch.no_grad():
-            for i in range(0, len(images), self.inception_batch_size):
-                batch = images[i:i + self.inception_batch_size]
+            for i in range(0, len(images), effective_batch_size):
+                batch = images[i:i + effective_batch_size]
                 
                 # 确保是3通道RGB图像，范围[0, 1]
                 if batch.size(1) != 3:
@@ -110,6 +144,13 @@ class FIDEvaluator:
                 # 提取特征
                 feat = self.inception(batch_processed)
                 features.append(feat.cpu())
+                
+                # 及时清理中间结果
+                del batch_processed, feat
+                
+                # 每处理几个批次清理一次内存
+                if (i // effective_batch_size) % 5 == 0:
+                    torch.cuda.empty_cache()
         
         return torch.cat(features, dim=0)
     
@@ -143,76 +184,133 @@ class FIDEvaluator:
             vae_model: VAE模型（实际上不需要，因为LDM.sample()已经包含解码）
             config: 配置字典
         """
+        self._check_memory("FID评估开始")
+        
         fid_config = config.get('evaluation', {}).get('fid_evaluation', {})
-        num_samples = fid_config.get('num_samples', 1000)
-        batch_size = fid_config.get('batch_size', 32)
+        num_samples = fid_config.get('num_samples', 500)  # 减少默认样本数
+        batch_size = fid_config.get('batch_size', 16)  # 减少批次大小
         num_inference_steps = fid_config.get('num_inference_steps', 50)
         num_classes = config.get('unet', {}).get('num_classes', 31)
         
+        # 根据可用内存动态调整参数
+        available_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        allocated_memory = torch.cuda.memory_allocated() / 1024**3
+        free_memory = available_memory - allocated_memory
+        
+        if free_memory < 3:  # 小于3GB可用内存
+            num_samples = min(num_samples, 200)  # 进一步减少样本数
+            batch_size = min(batch_size, 8)    # 进一步减少批次大小
+            print(f"⚠️  可用显存不足 ({free_memory:.1f}GB)，调整参数：samples={num_samples}, batch_size={batch_size}")
+        
         ldm_model.eval()
         
-        # 收集真实图像（RGB，范围[0,1]）
-        print(f"🔍 收集真实图像 ({num_samples} 张)...")
-        real_images = []
-        for batch_idx, batch in enumerate(real_loader):
-            if isinstance(batch, (list, tuple)) and len(batch) >= 2:
-                images = batch[0]  # [B, 3, H, W], 范围[-1, 1]
-            else:
-                images = batch
-            
-            # 转换到[0, 1]范围
-            images = (images + 1.0) / 2.0
-            images = torch.clamp(images, 0.0, 1.0)
-            
-            real_images.append(images)
-            if len(real_images) * images.size(0) >= num_samples:
-                break
-        
-        real_images = torch.cat(real_images, dim=0)[:num_samples]
-        
-        # 生成假图像
-        print(f"🎨 生成假图像 ({num_samples} 张)...")
-        fake_images = []
-        
-        with torch.no_grad():
-            num_batches = (num_samples + batch_size - 1) // batch_size
-            
-            for i in tqdm(range(num_batches), desc="生成图像"):
-                current_batch_size = min(batch_size, num_samples - i * batch_size)
-                
-                # 随机生成类别标签
-                if num_classes > 1:
-                    class_labels = torch.randint(0, num_classes, (current_batch_size,), device=self.device)
+        try:
+            # 收集真实图像（RGB，范围[0,1]）
+            print(f"🔍 收集真实图像 ({num_samples} 张)...")
+            real_images = []
+            for batch_idx, batch in enumerate(real_loader):
+                if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+                    images = batch[0]  # [B, 3, H, W], 范围[-1, 1]
                 else:
-                    class_labels = None
-                
-                # LDM生成RGB图像（已经包含了潜变量采样和VAE解码）
-                generated_images = ldm_model.sample(
-                    num_samples=current_batch_size,
-                    class_labels=class_labels,
-                    num_inference_steps=num_inference_steps,
-                    eta=0.0
-                )  # 返回 [B, 3, H, W]，范围[-1, 1]
+                    images = batch
                 
                 # 转换到[0, 1]范围
-                generated_images = (generated_images + 1.0) / 2.0
-                generated_images = torch.clamp(generated_images, 0.0, 1.0)
+                images = (images + 1.0) / 2.0
+                images = torch.clamp(images, 0.0, 1.0)
                 
-                fake_images.append(generated_images.cpu())
-        
-        fake_images = torch.cat(fake_images, dim=0)[:num_samples]
-        
-        # 提取特征
-        print(f"🧠 提取真实图像特征...")
-        real_features = self.extract_features(real_images)
-        
-        print(f"🧠 提取生成图像特征...")
-        fake_features = self.extract_features(fake_images)
-        
-        # 计算FID
-        fid_score = self.calculate_fid(real_features, fake_features)
-        
-        return fid_score, fake_images[:8]  # 返回FID分数和一些生成样本用于可视化
+                real_images.append(images.cpu())  # 立即移到CPU
+                if len(real_images) * images.size(0) >= num_samples:
+                    break
+            
+            real_images = torch.cat(real_images, dim=0)[:num_samples]
+            self._check_memory("真实图像收集完成")
+            
+            # 生成假图像
+            print(f"🎨 生成假图像 ({num_samples} 张)...")
+            fake_images = []
+            
+            with torch.no_grad():
+                num_batches = (num_samples + batch_size - 1) // batch_size
+                
+                for i in tqdm(range(num_batches), desc="生成图像"):
+                    current_batch_size = min(batch_size, num_samples - i * batch_size)
+                    
+                    # 随机生成类别标签
+                    if num_classes > 1:
+                        class_labels = torch.randint(0, num_classes, (current_batch_size,), device=self.device)
+                    else:
+                        class_labels = None
+                    
+                    # LDM生成RGB图像（已经包含了潜变量采样和VAE解码）
+                    generated_images = ldm_model.sample(
+                        num_samples=current_batch_size,
+                        class_labels=class_labels,
+                        num_inference_steps=num_inference_steps,
+                        eta=0.0
+                    )  # 返回 [B, 3, H, W]，范围[-1, 1]
+                    
+                    # 转换到[0, 1]范围
+                    generated_images = (generated_images + 1.0) / 2.0
+                    generated_images = torch.clamp(generated_images, 0.0, 1.0)
+                    
+                    fake_images.append(generated_images.cpu())  # 立即移到CPU
+                    
+                    # 清理显存
+                    del generated_images
+                    if class_labels is not None:
+                        del class_labels
+                    torch.cuda.empty_cache()
+            
+            fake_images = torch.cat(fake_images, dim=0)[:num_samples]
+            self._check_memory("假图像生成完成")
+            
+            # 提取特征
+            print(f"🧠 提取真实图像特征...")
+            real_features = self.extract_features(real_images)
+            
+            # 清理真实图像内存
+            del real_images
+            torch.cuda.empty_cache()
+            self._check_memory("真实图像特征提取完成")
+            
+            print(f"🧠 提取生成图像特征...")
+            fake_features = self.extract_features(fake_images)
+            sample_images = fake_images[:8].clone()  # 只保留8张用于可视化
+            
+            # 清理假图像内存
+            del fake_images
+            torch.cuda.empty_cache()
+            
+            # 卸载Inception模型
+            self._unload_inception_model()
+            self._check_memory("Inception模型卸载完成")
+            
+            # 计算FID
+            fid_score = self.calculate_fid(real_features, fake_features)
+            
+            return fid_score, sample_images
+            
+        except Exception as e:
+            # 出错时确保清理资源
+            print(f"❌ FID评估过程中出错: {e}")
+            self._unload_inception_model()
+            
+            # 强制清理所有可能的变量
+            try:
+                if 'real_images' in locals():
+                    del real_images
+                if 'fake_images' in locals():
+                    del fake_images
+                if 'real_features' in locals():
+                    del real_features
+                if 'fake_features' in locals():
+                    del fake_features
+            except:
+                pass
+            
+            torch.cuda.empty_cache()
+            self._check_memory("错误清理完成")
+            raise e
 
 
 class DataLoaderWrapper:
@@ -545,6 +643,16 @@ class LDMTrainer:
         """评估FID分数"""
         print(f"🎯 开始FID评估 (Epoch {epoch + 1})...")
         
+        # 预检查显存是否足够
+        if torch.cuda.is_available():
+            available_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            allocated_memory = torch.cuda.memory_allocated() / 1024**3
+            free_memory = available_memory - allocated_memory
+            
+            if free_memory < 1.5:  # 小于1.5GB可用内存
+                print(f"⚠️  可用显存不足 ({free_memory:.1f}GB < 1.5GB)，跳过FID评估")
+                return float('inf')
+        
         try:
             fid_score, sample_images = self.fid_evaluator.evaluate_fid(
                 ldm_model=self.model,
@@ -557,8 +665,7 @@ class LDMTrainer:
             
             # 保存FID评估的样本图像
             if len(sample_images) > 0:
-                sample_images = (sample_images + 1.0) / 2.0  # [-1,1] -> [0,1]
-                sample_images = torch.clamp(sample_images, 0.0, 1.0)
+                sample_images = torch.clamp(sample_images, 0.0, 1.0)  # 确保在[0,1]范围
                 
                 fig, axes = plt.subplots(2, 4, figsize=(12, 6))
                 axes = axes.flatten()
@@ -580,6 +687,8 @@ class LDMTrainer:
             
         except Exception as e:
             print(f"❌ FID评估失败: {e}")
+            # 强制清理内存
+            torch.cuda.empty_cache()
             return float('inf')
     
     @torch.no_grad()
