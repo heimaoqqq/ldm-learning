@@ -431,7 +431,7 @@ class LDMTrainer:
             )
             print(f"🏆 最佳模型已保存: {best_path}")
         
-        # 定期保存
+        # 定期保存（每10个epoch）
         if (epoch + 1) % 10 == 0:
             periodic_path = os.path.join(self.output_dir, 'checkpoints', f'epoch_{epoch+1:03d}.pth')
             self.model.save_checkpoint(
@@ -439,6 +439,36 @@ class LDMTrainer:
                 epoch=epoch,
                 metrics={'train_history': self.train_history}
             )
+            
+            # 删除旧的定期检查点（保留最近3个）
+            checkpoints_dir = os.path.join(self.output_dir, 'checkpoints')
+            try:
+                # 获取所有epoch检查点文件
+                epoch_files = []
+                for filename in os.listdir(checkpoints_dir):
+                    if filename.startswith('epoch_') and filename.endswith('.pth'):
+                        try:
+                            epoch_num = int(filename.split('_')[1].split('.')[0])
+                            epoch_files.append((epoch_num, filename))
+                        except (ValueError, IndexError):
+                            continue
+                
+                # 按epoch编号排序
+                epoch_files.sort(key=lambda x: x[0])
+                
+                # 删除旧的检查点，保留最近3个
+                if len(epoch_files) > 3:
+                    files_to_delete = epoch_files[:-3]  # 除了最后3个
+                    for epoch_num, filename in files_to_delete:
+                        old_path = os.path.join(checkpoints_dir, filename)
+                        if os.path.exists(old_path):
+                            os.remove(old_path)
+                            print(f"🗑️  删除旧检查点: {filename}")
+                            
+            except Exception as e:
+                print(f"⚠️  清理旧检查点时出错: {e}")
+        
+        print(f"💾 检查点已保存: {checkpoint_path}")
     
     def train(self, start_epoch: int = 0):
         """主训练循环"""
