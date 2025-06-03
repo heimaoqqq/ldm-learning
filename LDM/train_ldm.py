@@ -624,6 +624,23 @@ class LDMTrainer:
         total_loss = 0.0
         num_batches = len(self.train_loader)
         
+        # 从配置读取详细监控设置
+        monitoring_config = self.config.get('training', {}).get('detailed_monitoring', {})
+        detailed_monitoring = (
+            monitoring_config.get('enabled', True) and 
+            epoch < monitoring_config.get('monitor_epochs', 10)
+        )
+        monitor_batches = monitoring_config.get('monitor_batches', 5)
+        summary_interval = monitoring_config.get('summary_interval', 50)
+        
+        if detailed_monitoring:
+            print(f"\n🔍 第 {epoch+1} 轮详细监控:")
+            latent_stats = {'min': [], 'max': [], 'mean': [], 'std': []}
+            noise_stats = {'min': [], 'max': [], 'mean': [], 'std': []}
+            pred_stats = {'min': [], 'max': [], 'mean': [], 'std': []}
+            loss_components = []
+            gradient_norms = []
+        
         progress_bar = tqdm(
             self.train_loader,
             desc=f"Epoch {epoch+1} - Training",
@@ -642,16 +659,95 @@ class LDMTrainer:
             if class_labels is not None:
                 class_labels = class_labels.to(self.device)
             
+            # 详细监控：输入图像统计
+            if detailed_monitoring and batch_idx < monitor_batches:
+                img_min, img_max = images.min().item(), images.max().item()
+                img_mean, img_std = images.mean().item(), images.std().item()
+                print(f"  批次 {batch_idx+1} - 输入图像: 范围[{img_min:.3f}, {img_max:.3f}], 均值{img_mean:.3f}, 标准差{img_std:.3f}")
+            
             # 前向传播
             loss_dict = self.model(images, class_labels)
             loss = loss_dict['loss']
+            
+            # 详细监控：获取中间结果
+            if detailed_monitoring and batch_idx < monitor_batches:
+                with torch.no_grad():
+                    # 获取潜变量
+                    if hasattr(self.model, 'vae') and self.model.vae is not None:
+                        try:
+                            # VAE编码
+                            latent_dist = self.model.vae.encode(images)
+                            latents = latent_dist.sample() * self.model.scaling_factor
+                            
+                            # 统计潜变量
+                            lat_min, lat_max = latents.min().item(), latents.max().item()
+                            lat_mean, lat_std = latents.mean().item(), latents.std().item()
+                            latent_stats['min'].append(lat_min)
+                            latent_stats['max'].append(lat_max)
+                            latent_stats['mean'].append(lat_mean)
+                            latent_stats['std'].append(lat_std)
+                            
+                            print(f"    潜变量(缩放后): 范围[{lat_min:.3f}, {lat_max:.3f}], 均值{lat_mean:.3f}, 标准差{lat_std:.3f}")
+                            
+                            # 生成随机噪音时间步
+                            batch_size = latents.shape[0]
+                            timesteps = torch.randint(0, self.model.scheduler.num_train_timesteps, (batch_size,), device=self.device)
+                            
+                            # 添加噪音
+                            noise = torch.randn_like(latents)
+                            noisy_latents = self.model.scheduler.add_noise(latents, noise, timesteps)
+                            
+                            # 统计噪音和加噪后的潜变量
+                            noise_min, noise_max = noise.min().item(), noise.max().item()
+                            noise_mean, noise_std = noise.mean().item(), noise.std().item()
+                            noise_stats['min'].append(noise_min)
+                            noise_stats['max'].append(noise_max)
+                            noise_stats['mean'].append(noise_mean)
+                            noise_stats['std'].append(noise_std)
+                            
+                            noisy_min, noisy_max = noisy_latents.min().item(), noisy_latents.max().item()
+                            noisy_mean, noisy_std = noisy_latents.mean().item(), noisy_latents.std().item()
+                            
+                            print(f"    噪音: 范围[{noise_min:.3f}, {noise_max:.3f}], 均值{noise_mean:.3f}, 标准差{noise_std:.3f}")
+                            print(f"    加噪潜变量: 范围[{noisy_min:.3f}, {noisy_max:.3f}], 均值{noisy_mean:.3f}, 标准差{noisy_std:.3f}")
+                            
+                            # U-Net预测
+                            model_pred = self.model.unet(noisy_latents, timesteps, class_labels).sample
+                            pred_min, pred_max = model_pred.min().item(), model_pred.max().item()
+                            pred_mean, pred_std = model_pred.mean().item(), model_pred.std().item()
+                            pred_stats['min'].append(pred_min)
+                            pred_stats['max'].append(pred_max)
+                            pred_stats['mean'].append(pred_mean)
+                            pred_stats['std'].append(pred_std)
+                            
+                            print(f"    模型预测: 范围[{pred_min:.3f}, {pred_max:.3f}], 均值{pred_mean:.3f}, 标准差{pred_std:.3f}")
+                            
+                        except Exception as e:
+                            print(f"    ⚠️ 详细监控失败: {e}")
+            
+            # 记录损失组件
+            if detailed_monitoring:
+                loss_components.append(loss.item())
             
             # 反向传播
             self.optimizer.zero_grad()
             loss.backward()
             
+            # 详细监控：梯度统计
+            if detailed_monitoring and batch_idx < monitor_batches:
+                total_norm = 0
+                param_count = 0
+                for p in self.model.unet.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                        param_count += p.numel()
+                total_norm = total_norm ** (1. / 2)
+                gradient_norms.append(total_norm)
+                print(f"    梯度范数: {total_norm:.6f}, 参数数量: {param_count:,}")
+            
             # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(self.model.unet.parameters(), max_norm=1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.unet.parameters(), max_norm=1.0)
             
             # 优化器步进
             self.optimizer.step()
@@ -664,14 +760,125 @@ class LDMTrainer:
             progress_bar.set_postfix({
                 'Loss': f'{loss.item():.4f}',
                 'Avg': f'{avg_loss:.4f}',
-                'LR': f'{self.optimizer.param_groups[0]["lr"]:.2e}'
+                'LR': f'{self.optimizer.param_groups[0]["lr"]:.2e}',
+                'GradNorm': f'{grad_norm:.3f}' if isinstance(grad_norm, (int, float)) else 'N/A'
             })
             
             # 清理显存
             if batch_idx % 10 == 0:
                 torch.cuda.empty_cache()
+            
+            # 详细监控：定期总结
+            if detailed_monitoring and (batch_idx + 1) % summary_interval == 0:
+                self._print_monitoring_summary(epoch, batch_idx, latent_stats, noise_stats, pred_stats, loss_components, gradient_norms)
+        
+        # 详细监控：epoch结束总结
+        if detailed_monitoring:
+            self._print_epoch_monitoring_summary(epoch, latent_stats, noise_stats, pred_stats, loss_components, gradient_norms)
         
         return total_loss / num_batches
+    
+    def _print_monitoring_summary(self, epoch, batch_idx, latent_stats, noise_stats, pred_stats, loss_components, gradient_norms):
+        """打印监控数据摘要"""
+        print(f"\n  📊 批次 1-{batch_idx+1} 统计摘要:")
+        
+        if latent_stats['mean']:
+            lat_mean_avg = np.mean(latent_stats['mean'])
+            lat_std_avg = np.mean(latent_stats['std'])
+            print(f"    潜变量: 平均均值={lat_mean_avg:.4f}, 平均标准差={lat_std_avg:.4f}")
+        
+        if noise_stats['mean']:
+            noise_mean_avg = np.mean(noise_stats['mean'])
+            noise_std_avg = np.mean(noise_stats['std'])
+            print(f"    噪音: 平均均值={noise_mean_avg:.4f}, 平均标准差={noise_std_avg:.4f}")
+        
+        if pred_stats['mean']:
+            pred_mean_avg = np.mean(pred_stats['mean'])
+            pred_std_avg = np.mean(pred_stats['std'])
+            print(f"    预测: 平均均值={pred_mean_avg:.4f}, 平均标准差={pred_std_avg:.4f}")
+        
+        if loss_components:
+            loss_avg = np.mean(loss_components)
+            loss_std = np.std(loss_components)
+            print(f"    损失: 平均={loss_avg:.4f}, 标准差={loss_std:.4f}")
+        
+        if gradient_norms:
+            grad_avg = np.mean(gradient_norms)
+            grad_std = np.std(gradient_norms)
+            print(f"    梯度: 平均范数={grad_avg:.6f}, 标准差={grad_std:.6f}")
+    
+    def _print_epoch_monitoring_summary(self, epoch, latent_stats, noise_stats, pred_stats, loss_components, gradient_norms):
+        """打印epoch监控总结"""
+        print(f"\n🎯 第 {epoch+1} 轮完整统计:")
+        print(f"  缩放因子: {self.model.scaling_factor:.6f}")
+        
+        if latent_stats['mean']:
+            print(f"  潜变量统计:")
+            print(f"    均值范围: [{min(latent_stats['mean']):.4f}, {max(latent_stats['mean']):.4f}]")
+            print(f"    标准差范围: [{min(latent_stats['std']):.4f}, {max(latent_stats['std']):.4f}]")
+            print(f"    数值范围: [{min(latent_stats['min']):.4f}, {max(latent_stats['max']):.4f}]")
+        
+        if noise_stats['mean']:
+            print(f"  噪音统计:")
+            print(f"    均值范围: [{min(noise_stats['mean']):.4f}, {max(noise_stats['mean']):.4f}]")
+            print(f"    标准差范围: [{min(noise_stats['std']):.4f}, {max(noise_stats['std']):.4f}]")
+        
+        if pred_stats['mean']:
+            print(f"  预测统计:")
+            print(f"    均值范围: [{min(pred_stats['mean']):.4f}, {max(pred_stats['mean']):.4f}]")
+            print(f"    标准差范围: [{min(pred_stats['std']):.4f}, {max(pred_stats['std']):.4f}]")
+        
+        if loss_components:
+            print(f"  损失统计:")
+            print(f"    损失范围: [{min(loss_components):.4f}, {max(loss_components):.4f}]")
+            print(f"    平均损失: {np.mean(loss_components):.4f}")
+        
+        if gradient_norms:
+            print(f"  梯度统计:")
+            print(f"    梯度范数范围: [{min(gradient_norms):.6f}, {max(gradient_norms):.6f}]")
+            print(f"    平均梯度范数: {np.mean(gradient_norms):.6f}")
+        
+        # 健康检查
+        print(f"  🔍 健康检查:")
+        checks = []
+        
+        if latent_stats['std']:
+            avg_latent_std = np.mean(latent_stats['std'])
+            if 0.8 <= avg_latent_std <= 1.2:
+                checks.append("✅ 潜变量标准差正常")
+            else:
+                checks.append(f"⚠️ 潜变量标准差异常: {avg_latent_std:.3f} (期望: ~1.0)")
+        
+        if noise_stats['std']:
+            avg_noise_std = np.mean(noise_stats['std'])
+            if 0.9 <= avg_noise_std <= 1.1:
+                checks.append("✅ 噪音标准差正常")
+            else:
+                checks.append(f"⚠️ 噪音标准差异常: {avg_noise_std:.3f} (期望: ~1.0)")
+        
+        if loss_components:
+            latest_loss = loss_components[-5:]  # 最后5个批次
+            avg_recent_loss = np.mean(latest_loss)
+            if avg_recent_loss < 1.0:
+                checks.append("✅ 损失值合理")
+            elif avg_recent_loss > 5.0:
+                checks.append(f"⚠️ 损失值过高: {avg_recent_loss:.3f}")
+            else:
+                checks.append(f"📊 损失值: {avg_recent_loss:.3f}")
+        
+        if gradient_norms:
+            avg_grad_norm = np.mean(gradient_norms)
+            if avg_grad_norm < 0.001:
+                checks.append("⚠️ 梯度可能过小")
+            elif avg_grad_norm > 10.0:
+                checks.append("⚠️ 梯度可能过大")
+            else:
+                checks.append("✅ 梯度范数正常")
+        
+        for check in checks:
+            print(f"    {check}")
+        
+        print("=" * 60)
     
     @torch.no_grad()
     def validate_epoch(self, epoch: int) -> float:
@@ -932,8 +1139,32 @@ class LDMTrainer:
                 auto_update = train_config.get('auto_update_scaling_factor', True)
                 if auto_update:
                     print(f"🔄 自动更新缩放因子...")
+                    old_factor = self.model.scaling_factor
                     self.model.scaling_factor = optimal_scaling_factor
-                    print(f"✅ 缩放因子已更新为: {optimal_scaling_factor:.6f}")
+                    print(f"✅ 缩放因子已更新: {old_factor:.6f} → {optimal_scaling_factor:.6f}")
+                    
+                    # 验证更新是否成功
+                    print(f"🔍 验证更新结果:")
+                    with torch.no_grad():
+                        # 测试一个小批次的编码
+                        test_batch = next(iter(self.train_loader))
+                        if isinstance(test_batch, (list, tuple)):
+                            test_images = test_batch[0][:2]  # 只取2张图片
+                        else:
+                            test_images = test_batch[:2]
+                        
+                        test_images = test_images.to(self.device)
+                        latent_dist = self.vae_model.encode(test_images)
+                        test_latents = latent_dist.sample() * self.model.scaling_factor
+                        
+                        test_mean = test_latents.mean().item()
+                        test_std = test_latents.std().item()
+                        print(f"   测试编码结果: 均值={test_mean:.4f}, 标准差={test_std:.4f}")
+                        
+                        if 0.8 <= test_std <= 1.2:
+                            print(f"   ✅ 缩放效果验证通过")
+                        else:
+                            print(f"   ⚠️  缩放效果可能有问题，标准差={test_std:.4f} (期望: ~1.0)")
                 else:
                     print(f"⚠️  建议手动更新配置中的缩放因子")
             
