@@ -392,7 +392,7 @@ def compute_scaling_factor(
             # VAE编码（获取原始潜变量）
             with torch.amp.autocast(device_type='cuda', enabled=False):
                 images = images.float()
-                latent_dist = vae_model.encode(images).latent_dist
+                latent_dist = vae_model.encode(images)  # 直接返回DiagonalGaussianDistribution
                 latents = latent_dist.sample()  # [B, 4, H, W]
             
             latent_samples.append(latents.cpu().flatten())  # 展平所有维度
@@ -563,7 +563,10 @@ def main():
         checkpoint = torch.load(vae_checkpoint_path, map_location='cpu')
         
         # 处理不同的保存格式
-        if 'model_state_dict' in checkpoint:
+        if 'vae_state_dict' in checkpoint:
+            state_dict = checkpoint['vae_state_dict']
+            print("✅ 检测到 'vae_state_dict' 格式")
+        elif 'model_state_dict' in checkpoint:
             state_dict = checkpoint['model_state_dict']
             print("✅ 检测到 'model_state_dict' 格式")
         elif 'state_dict' in checkpoint:
