@@ -32,11 +32,11 @@ diffusion:
 # 训练配置
 training:
   epochs: 50                                 # 训练轮次
-  learning_rate: 0.00005                    # 降低学习率（从1e-4降到5e-5）解决梯度过大问题
+  learning_rate: 0.00008                    # 适当提高学习率（从5e-5提到8e-5）
   weight_decay: 0.01                         # 权重衰减
   scheduler: "cosine"                        # 学习率调度器（cosine/step/none）
-  min_lr: 0.000001                          # 最小学习率
-  gradient_clip: 0.5                         # 加强梯度裁剪（从1.0降到0.5）
+  min_lr: 0.000002                          # 提高最小学习率（从1e-6提到2e-6）
+  gradient_clip: 1.0                         # 放松梯度裁剪（从0.5恢复到1.0）
   auto_update_scaling_factor: true           # 保持自动计算缩放因子（不人为调整）
   
   # 详细数值监控配置（用于调试和验证）
