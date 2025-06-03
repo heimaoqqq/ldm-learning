@@ -32,18 +32,18 @@ diffusion:
 # 训练配置
 training:
   epochs: 50                                 # 训练轮次
-  learning_rate: 0.0001                     # 初始学习率
+  learning_rate: 0.00005                    # 降低学习率（从1e-4降到5e-5）解决梯度过大问题
   weight_decay: 0.01                         # 权重衰减
   scheduler: "cosine"                        # 学习率调度器（cosine/step/none）
   min_lr: 0.000001                          # 最小学习率
-  gradient_clip: 1.0                         # 梯度裁剪阈值
-  auto_update_scaling_factor: true           # 是否自动更新VAE缩放因子（重新训练VAE后推荐开启）
+  gradient_clip: 0.5                         # 加强梯度裁剪（从1.0降到0.5）
+  auto_update_scaling_factor: true           # 保持自动计算缩放因子（不人为调整）
   
   # 详细数值监控配置（用于调试和验证）
   detailed_monitoring:
     enabled: true                            # 是否启用详细监控
-    monitor_epochs: 10                        # 监控前10个epoch（减少输出）
-    monitor_batches: 3                       # 每个epoch监控前3个批次（减少输出）
+    monitor_epochs: 3                        # 只监控前3个epoch（减少输出）
+    monitor_batches: 2                       # 每个epoch监控前2个批次（减少输出）
     summary_interval: 200                    # 每200个批次输出一次摘要（减少输出）
     check_scaling_factor: true               # 是否检查缩放因子效果
 
@@ -69,12 +69,12 @@ evaluation:
 
 # 输出配置
 output_dir: "./ldm_outputs"                  # 输出目录
-save_every_epochs: 10                       # 每隔几个epoch保存检查点
+save_every_epochs: 25                       # 减少保存频率，每20个epoch保存一次
 
 # 内存优化配置
 optimization:
   mixed_precision: false                     # 混合精度训练（VAE已处理dtype问题）
-  gradient_accumulation: 1                   # 梯度累积步数
+  gradient_accumulation: 2                   # 使用梯度累积增强稳定性
   memory_efficient_attention: true           # 内存高效注意力
   
 # 数据归一化配置
