@@ -576,8 +576,8 @@ class LDMTrainer:
             # 使用VAE编码（不应用缩放因子）
             with torch.amp.autocast(device_type='cuda', enabled=False):
                 images = images.float()
-                latent_dist = self.vae_model.encode(images).latent_dist
-                latents = latent_dist.sample()  # 原始潜变量，未缩放
+                posterior = self.vae_model.encode(images)
+                latents = posterior.latent_dist.sample()  # 原始潜变量，未缩放
             
             latent_samples.append(latents.cpu())
             sample_count += latents.shape[0]
@@ -676,8 +676,8 @@ class LDMTrainer:
                     if hasattr(self.model, 'vae') and self.model.vae is not None:
                         try:
                             # VAE编码
-                            latent_dist = self.model.vae.encode(images)
-                            latents = latent_dist.sample() * self.model.scaling_factor
+                            posterior = self.model.vae.encode(images)
+                            latents = posterior.latent_dist.sample() * self.model.scaling_factor
                             
                             # 统计潜变量
                             lat_min, lat_max = latents.min().item(), latents.max().item()
@@ -1154,8 +1154,8 @@ class LDMTrainer:
                             test_images = test_batch[:2]
                         
                         test_images = test_images.to(self.device)
-                        latent_dist = self.vae_model.encode(test_images)
-                        test_latents = latent_dist.sample() * self.model.scaling_factor
+                        posterior = self.vae_model.encode(test_images)
+                        test_latents = posterior.latent_dist.sample() * self.model.scaling_factor
                         
                         test_mean = test_latents.mean().item()
                         test_std = test_latents.std().item()
