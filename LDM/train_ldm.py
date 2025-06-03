@@ -19,6 +19,11 @@ from typing import Dict, Any, Optional, Tuple
 import warnings
 warnings.filterwarnings('ignore')
 
+# FID评估相关导入
+from torchvision import models
+from scipy import linalg
+from torchvision.transforms.functional import resize, to_tensor
+
 # 导入我们的模块
 from ldm_model import create_ldm_model, LatentDiffusionModel
 # 修改数据加载器导入
@@ -48,6 +53,166 @@ else:
 # 内存优化
 torch.backends.cudnn.benchmark = True
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
+
+class FIDEvaluator:
+    """FID评估器，用于计算生成图像的FID分数"""
+    
+    def __init__(self, device='cuda', inception_batch_size=64):
+        self.device = device
+        self.inception_batch_size = inception_batch_size
+        
+        # 加载预训练的Inception-v3模型
+        self.inception = models.inception_v3(pretrained=True, transform_input=False)
+        self.inception.fc = nn.Identity()  # 移除最后的分类层
+        self.inception.eval()
+        self.inception.to(device)
+        
+        # 图像预处理（用于Inception-v3）
+        self.preprocess = transforms.Compose([
+            transforms.Resize((299, 299)),  # Inception-v3需要299x299输入
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        
+        print("✅ FID评估器初始化完成")
+    
+    def extract_features(self, images):
+        """
+        提取图像特征
+        输入: [N, 3, H, W] 的RGB图像，范围[0, 1]
+        """
+        features = []
+        
+        with torch.no_grad():
+            for i in range(0, len(images), self.inception_batch_size):
+                batch = images[i:i + self.inception_batch_size]
+                
+                # 确保是3通道RGB图像，范围[0, 1]
+                if batch.size(1) != 3:
+                    raise ValueError(f"期望3通道RGB图像，得到{batch.size(1)}通道")
+                
+                # 检查数值范围
+                if batch.min() < -0.1 or batch.max() > 1.1:
+                    print(f"⚠️  图像像素范围异常: [{batch.min():.3f}, {batch.max():.3f}]")
+                
+                # 裁剪到[0, 1]范围
+                batch = torch.clamp(batch, 0.0, 1.0)
+                
+                # 调整大小并标准化
+                batch_processed = []
+                for img in batch:
+                    img_resized = resize(img, (299, 299))
+                    img_normalized = self.preprocess(img_resized)
+                    batch_processed.append(img_normalized)
+                
+                batch_processed = torch.stack(batch_processed).to(self.device)
+                
+                # 提取特征
+                feat = self.inception(batch_processed)
+                features.append(feat.cpu())
+        
+        return torch.cat(features, dim=0)
+    
+    def calculate_fid(self, real_features, fake_features):
+        """计算FID分数"""
+        # 转换为numpy
+        real_features = real_features.numpy()
+        fake_features = fake_features.numpy()
+        
+        # 计算均值和协方差
+        mu1, sigma1 = real_features.mean(axis=0), np.cov(real_features, rowvar=False)
+        mu2, sigma2 = fake_features.mean(axis=0), np.cov(fake_features, rowvar=False)
+        
+        # 计算FID
+        diff = mu1 - mu2
+        covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
+        
+        if np.iscomplexobj(covmean):
+            covmean = covmean.real
+        
+        fid = diff.dot(diff) + np.trace(sigma1 + sigma2 - 2 * covmean)
+        return fid
+    
+    def evaluate_fid(self, ldm_model, real_loader, vae_model, config):
+        """
+        评估FID分数
+        
+        Args:
+            ldm_model: 潜在扩散模型
+            real_loader: 真实图像数据加载器
+            vae_model: VAE模型（实际上不需要，因为LDM.sample()已经包含解码）
+            config: 配置字典
+        """
+        fid_config = config.get('evaluation', {}).get('fid_evaluation', {})
+        num_samples = fid_config.get('num_samples', 1000)
+        batch_size = fid_config.get('batch_size', 32)
+        num_inference_steps = fid_config.get('num_inference_steps', 50)
+        num_classes = config.get('unet', {}).get('num_classes', 31)
+        
+        ldm_model.eval()
+        
+        # 收集真实图像（RGB，范围[0,1]）
+        print(f"🔍 收集真实图像 ({num_samples} 张)...")
+        real_images = []
+        for batch_idx, batch in enumerate(real_loader):
+            if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+                images = batch[0]  # [B, 3, H, W], 范围[-1, 1]
+            else:
+                images = batch
+            
+            # 转换到[0, 1]范围
+            images = (images + 1.0) / 2.0
+            images = torch.clamp(images, 0.0, 1.0)
+            
+            real_images.append(images)
+            if len(real_images) * images.size(0) >= num_samples:
+                break
+        
+        real_images = torch.cat(real_images, dim=0)[:num_samples]
+        
+        # 生成假图像
+        print(f"🎨 生成假图像 ({num_samples} 张)...")
+        fake_images = []
+        
+        with torch.no_grad():
+            num_batches = (num_samples + batch_size - 1) // batch_size
+            
+            for i in tqdm(range(num_batches), desc="生成图像"):
+                current_batch_size = min(batch_size, num_samples - i * batch_size)
+                
+                # 随机生成类别标签
+                if num_classes > 1:
+                    class_labels = torch.randint(0, num_classes, (current_batch_size,), device=self.device)
+                else:
+                    class_labels = None
+                
+                # LDM生成RGB图像（已经包含了潜变量采样和VAE解码）
+                generated_images = ldm_model.sample(
+                    num_samples=current_batch_size,
+                    class_labels=class_labels,
+                    num_inference_steps=num_inference_steps,
+                    eta=0.0
+                )  # 返回 [B, 3, H, W]，范围[-1, 1]
+                
+                # 转换到[0, 1]范围
+                generated_images = (generated_images + 1.0) / 2.0
+                generated_images = torch.clamp(generated_images, 0.0, 1.0)
+                
+                fake_images.append(generated_images.cpu())
+        
+        fake_images = torch.cat(fake_images, dim=0)[:num_samples]
+        
+        # 提取特征
+        print(f"🧠 提取真实图像特征...")
+        real_features = self.extract_features(real_images)
+        
+        print(f"🧠 提取生成图像特征...")
+        fake_features = self.extract_features(fake_images)
+        
+        # 计算FID
+        fid_score = self.calculate_fid(real_features, fake_features)
+        
+        return fid_score, fake_images[:8]  # 返回FID分数和一些生成样本用于可视化
 
 
 class DataLoaderWrapper:
@@ -98,16 +263,23 @@ class LDMTrainer:
         # 初始化数据加载器
         self._init_dataloader()
         
+        # 初始化FID评估器
+        fid_config = self.config.get('evaluation', {}).get('fid_evaluation', {})
+        inception_batch_size = fid_config.get('inception_batch_size', 64)
+        self.fid_evaluator = FIDEvaluator(device=self.device, inception_batch_size=inception_batch_size)
+        
         # 训练历史
         self.train_history = {
             'epoch': [],
             'train_loss': [],
             'val_loss': [],
+            'fid_score': [],
             'lr': []
         }
         
-        # 最佳验证损失
+        # 最佳验证损失和FID
         self.best_val_loss = float('inf')
+        self.best_fid_score = float('inf')
         
     def _init_model(self):
         """初始化模型"""
@@ -124,6 +296,9 @@ class LDMTrainer:
             diffusion_config=diffusion_config,
             device=self.device
         )
+        
+        # 保存VAE模型引用，用于FID评估时的解码
+        self.vae_model = self.model.vae
         
         print(f"✅ LDM模型创建成功")
         
@@ -366,9 +541,55 @@ class LDMTrainer:
         return total_loss / num_batches
     
     @torch.no_grad()
+    def evaluate_fid(self, epoch: int) -> float:
+        """评估FID分数"""
+        print(f"🎯 开始FID评估 (Epoch {epoch + 1})...")
+        
+        try:
+            fid_score, sample_images = self.fid_evaluator.evaluate_fid(
+                ldm_model=self.model,
+                real_loader=self.val_loader,
+                vae_model=None,  # 不再需要，因为model.sample()已经包含解码
+                config=self.config
+            )
+            
+            print(f"📊 FID Score: {fid_score:.2f}")
+            
+            # 保存FID评估的样本图像
+            if len(sample_images) > 0:
+                sample_images = (sample_images + 1.0) / 2.0  # [-1,1] -> [0,1]
+                sample_images = torch.clamp(sample_images, 0.0, 1.0)
+                
+                fig, axes = plt.subplots(2, 4, figsize=(12, 6))
+                axes = axes.flatten()
+                
+                for i in range(min(8, len(sample_images))):
+                    img = sample_images[i].permute(1, 2, 0).cpu().numpy()
+                    axes[i].imshow(img)
+                    axes[i].axis('off')
+                    axes[i].set_title(f'Generated')
+                
+                plt.tight_layout()
+                fid_sample_path = os.path.join(self.output_dir, 'samples', f'fid_epoch_{epoch+1:03d}.png')
+                plt.savefig(fid_sample_path, dpi=150, bbox_inches='tight')
+                plt.close()
+                
+                print(f"📸 FID样本图像已保存: {fid_sample_path}")
+            
+            return fid_score
+            
+        except Exception as e:
+            print(f"❌ FID评估失败: {e}")
+            return float('inf')
+    
+    @torch.no_grad()
     def generate_samples(self, epoch: int, num_samples: int = 4):
         """生成样本图像"""
         self.model.eval()
+        
+        # 从配置读取参数
+        sample_config = self.config.get('evaluation', {}).get('sample_generation', {})
+        inference_steps = sample_config.get('inference_steps', 50)
         
         # 随机选择类别标签
         if self.model.unet.num_classes and self.model.unet.num_classes > 1:
@@ -380,7 +601,7 @@ class LDMTrainer:
         generated_images = self.model.sample(
             num_samples=num_samples,
             class_labels=class_labels,
-            num_inference_steps=50,
+            num_inference_steps=inference_steps,
             eta=0.0  # DDIM确定性采样
         )
         
@@ -407,7 +628,7 @@ class LDMTrainer:
         
         print(f"📸 样本图像已保存: {sample_path}")
     
-    def save_checkpoint(self, epoch: int, is_best: bool = False):
+    def save_checkpoint(self, epoch: int, is_best: bool = False, is_best_fid: bool = False):
         """保存检查点"""
         # 保存最新检查点
         checkpoint_path = os.path.join(self.output_dir, 'checkpoints', 'latest.pth')
@@ -419,9 +640,19 @@ class LDMTrainer:
             metrics={'train_history': self.train_history}
         )
         
-        # 保存最佳模型
+        # 保存最佳验证损失模型
         if is_best:
-            best_path = os.path.join(self.output_dir, 'checkpoints', 'best.pth')
+            best_path = os.path.join(self.output_dir, 'checkpoints', 'best_val_loss.pth')
+            
+            # 删除旧的最佳验证损失模型
+            old_best_path = os.path.join(self.output_dir, 'checkpoints', 'best_val_loss.pth')
+            if os.path.exists(old_best_path):
+                try:
+                    os.remove(old_best_path)
+                    print(f"🗑️  删除旧的最佳验证损失模型")
+                except Exception as e:
+                    print(f"⚠️  删除旧模型失败: {e}")
+            
             self.model.save_checkpoint(
                 filepath=best_path,
                 epoch=epoch,
@@ -429,10 +660,33 @@ class LDMTrainer:
                 scheduler_state=self.scheduler.state_dict() if self.scheduler else None,
                 metrics={'train_history': self.train_history}
             )
-            print(f"🏆 最佳模型已保存: {best_path}")
+            print(f"🏆 最佳验证损失模型已保存: {best_path}")
         
-        # 定期保存（每10个epoch）
-        if (epoch + 1) % 10 == 0:
+        # 保存最佳FID模型
+        if is_best_fid:
+            best_fid_path = os.path.join(self.output_dir, 'checkpoints', 'best_fid.pth')
+            
+            # 删除旧的最佳FID模型
+            old_best_fid_path = os.path.join(self.output_dir, 'checkpoints', 'best_fid.pth')
+            if os.path.exists(old_best_fid_path):
+                try:
+                    os.remove(old_best_fid_path)
+                    print(f"🗑️  删除旧的最佳FID模型")
+                except Exception as e:
+                    print(f"⚠️  删除旧FID模型失败: {e}")
+            
+            self.model.save_checkpoint(
+                filepath=best_fid_path,
+                epoch=epoch,
+                optimizer_state=self.optimizer.state_dict(),
+                scheduler_state=self.scheduler.state_dict() if self.scheduler else None,
+                metrics={'train_history': self.train_history}
+            )
+            print(f"🎯 最佳FID模型已保存: {best_fid_path}")
+        
+        # 定期保存（根据配置）
+        save_every_epochs = self.config.get('save_every_epochs', 10)
+        if (epoch + 1) % save_every_epochs == 0:
             periodic_path = os.path.join(self.output_dir, 'checkpoints', f'epoch_{epoch+1:03d}.pth')
             self.model.save_checkpoint(
                 filepath=periodic_path,
@@ -489,6 +743,14 @@ class LDMTrainer:
             # 验证
             val_loss = self.validate_epoch(epoch)
             
+            # FID评估（根据配置）
+            fid_config = self.config.get('evaluation', {}).get('fid_evaluation', {})
+            sample_config = self.config.get('evaluation', {}).get('sample_generation', {})
+            
+            fid_score = None
+            if fid_config.get('enabled', True) and (epoch + 1) % fid_config.get('eval_every_epochs', 5) == 0:
+                fid_score = self.evaluate_fid(epoch)
+            
             # 学习率调度
             if self.scheduler:
                 self.scheduler.step()
@@ -497,31 +759,49 @@ class LDMTrainer:
             self.train_history['epoch'].append(epoch + 1)
             self.train_history['train_loss'].append(train_loss)
             self.train_history['val_loss'].append(val_loss)
+            self.train_history['fid_score'].append(fid_score if fid_score is not None else None)
             self.train_history['lr'].append(self.optimizer.param_groups[0]['lr'])
             
             # 打印统计
             print(f"📊 Train Loss: {train_loss:.4f}")
             print(f"📊 Val Loss: {val_loss:.4f}")
+            if fid_score is not None:
+                print(f"📊 FID Score: {fid_score:.2f}")
             print(f"📊 Learning Rate: {self.optimizer.param_groups[0]['lr']:.2e}")
             
             # 检查是否为最佳模型
             is_best = val_loss < self.best_val_loss
+            is_best_fid = False
+            
             if is_best:
                 self.best_val_loss = val_loss
                 print(f"🎯 新的最佳验证损失: {val_loss:.4f}")
             
-            # 保存检查点
-            self.save_checkpoint(epoch, is_best)
+            if fid_score is not None and fid_score < self.best_fid_score:
+                self.best_fid_score = fid_score
+                is_best_fid = True
+                print(f"🎯 新的最佳FID分数: {fid_score:.2f}")
             
-            # 生成样本
-            if (epoch + 1) % 5 == 0:  # 每5个epoch生成一次样本
-                self.generate_samples(epoch)
+            # 保存检查点
+            self.save_checkpoint(epoch, is_best, is_best_fid)
+            
+            # 生成样本（根据配置）
+            if (epoch + 1) % sample_config.get('sample_every_epochs', 5) == 0:
+                num_samples = sample_config.get('num_sample_images', 4)
+                self.generate_samples(epoch, num_samples)
             
             # 清理显存
             torch.cuda.empty_cache()
         
         print(f"\n✅ 训练完成!")
         print(f"🏆 最佳验证损失: {self.best_val_loss:.4f}")
+        print(f"🎯 最佳FID分数: {self.best_fid_score:.2f}")
+        
+        # 保存训练历史
+        history_path = os.path.join(self.output_dir, 'training_history.json')
+        with open(history_path, 'w') as f:
+            json.dump(self.train_history, f, indent=2)
+        print(f"📈 训练历史已保存: {history_path}")
 
 
 def load_config(config_path: str = None) -> Dict[str, Any]:
