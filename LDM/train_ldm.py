@@ -149,10 +149,15 @@ class LDMTrainer:
         # 学习率调度器
         scheduler_type = train_config.get('scheduler', 'cosine')
         if scheduler_type == 'cosine':
+            # 确保eta_min是浮点数类型
+            min_lr = train_config.get('min_lr', 1e-6)
+            if isinstance(min_lr, str):
+                min_lr = float(min_lr)
+            
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 self.optimizer,
                 T_max=train_config.get('epochs', 100),
-                eta_min=train_config.get('min_lr', 1e-6)
+                eta_min=min_lr
             )
         elif scheduler_type == 'step':
             self.scheduler = torch.optim.lr_scheduler.StepLR(
@@ -522,15 +527,15 @@ def load_config(config_path: str = None) -> Dict[str, Any]:
             'diffusion': {
                 'timesteps': 1000,
                 'beta_schedule': 'cosine',
-                'beta_start': 0.0001,
+                'beta_start': 0.0001,  # 0.0001
                 'beta_end': 0.02
             },
             'training': {
                 'epochs': 50,
-                'learning_rate': 1e-4,
+                'learning_rate': 0.0001,  # 1e-4
                 'weight_decay': 0.01,
                 'scheduler': 'cosine',
-                'min_lr': 1e-6
+                'min_lr': 0.000001  # 1e-6
             },
             'output_dir': './ldm_outputs'
         }
