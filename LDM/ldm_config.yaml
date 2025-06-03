@@ -32,7 +32,7 @@ diffusion:
 # 训练配置
 training:
   epochs: 50                                 # 训练轮次
-  learning_rate: 1e-4                       # 初始学习率
+  learning_rate: 0.0001                       # 初始学习率
   weight_decay: 0.01                         # 权重衰减
   scheduler: "cosine"                        # 学习率调度器（cosine/step/none）
   min_lr: 1e-6                               # 最小学习率
