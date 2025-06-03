@@ -23,6 +23,8 @@ warnings.filterwarnings('ignore')
 from torchvision import models
 from scipy import linalg
 from torchvision.transforms.functional import resize, to_tensor
+from pathlib import Path
+import shutil
 
 # 导入我们的模块
 from ldm_model import create_ldm_model, LatentDiffusionModel
@@ -229,42 +231,50 @@ class FIDEvaluator:
             print(f"🎨 生成假图像 ({num_samples} 张)...")
             fake_images = []
             
-            with torch.no_grad():
-                num_batches = (num_samples + batch_size - 1) // batch_size
-                
-                # 简化进度条显示，不显示具体描述只显示总体进度
-                for i in range(num_batches):
-                    current_batch_size = min(batch_size, num_samples - i * batch_size)
+            # 禁用采样过程中的进度条
+            old_tqdm_disable = os.environ.get('TQDM_DISABLE', '0')
+            os.environ['TQDM_DISABLE'] = '1'
+            
+            try:
+                with torch.no_grad():
+                    num_batches = (num_samples + batch_size - 1) // batch_size
                     
-                    # 随机生成类别标签
-                    if num_classes > 1:
-                        class_labels = torch.randint(0, num_classes, (current_batch_size,), device=self.device)
-                    else:
-                        class_labels = None
-                    
-                    # LDM生成RGB图像（已经包含了潜变量采样和VAE解码）
-                    generated_images = ldm_model.sample(
-                        num_samples=current_batch_size,
-                        class_labels=class_labels,
-                        num_inference_steps=num_inference_steps,
-                        eta=0.0
-                    )  # 返回 [B, 3, H, W]，范围[-1, 1]
-                    
-                    # 转换到[0, 1]范围
-                    generated_images = (generated_images + 1.0) / 2.0
-                    generated_images = torch.clamp(generated_images, 0.0, 1.0)
-                    
-                    fake_images.append(generated_images.cpu())  # 立即移到CPU
-                    
-                    # 简化进度显示
-                    if (i + 1) % max(1, num_batches // 4) == 0 or i == num_batches - 1:
-                        print(f"   📊 已生成 {(i + 1) * batch_size}/{num_samples} 张图像...")
-                    
-                    # 清理显存
-                    del generated_images
-                    if class_labels is not None:
-                        del class_labels
-                    torch.cuda.empty_cache()
+                    # 简化进度条显示，不显示具体描述只显示总体进度
+                    for i in range(num_batches):
+                        current_batch_size = min(batch_size, num_samples - i * batch_size)
+                        
+                        # 随机生成类别标签
+                        if num_classes > 1:
+                            class_labels = torch.randint(0, num_classes, (current_batch_size,), device=self.device)
+                        else:
+                            class_labels = None
+                        
+                        # LDM生成RGB图像（已经包含了潜变量采样和VAE解码）
+                        generated_images = ldm_model.sample(
+                            num_samples=current_batch_size,
+                            class_labels=class_labels,
+                            num_inference_steps=num_inference_steps,
+                            eta=0.0
+                        )  # 返回 [B, 3, H, W]，范围[-1, 1]
+                        
+                        # 转换到[0, 1]范围
+                        generated_images = (generated_images + 1.0) / 2.0
+                        generated_images = torch.clamp(generated_images, 0.0, 1.0)
+                        
+                        fake_images.append(generated_images.cpu())  # 立即移到CPU
+                        
+                        # 简化进度显示
+                        if (i + 1) % max(1, num_batches // 4) == 0 or i == num_batches - 1:
+                            print(f"   📊 已生成 {min((i + 1) * batch_size, num_samples)}/{num_samples} 张图像")
+                        
+                        # 清理显存
+                        del generated_images
+                        if class_labels is not None:
+                            del class_labels
+                        torch.cuda.empty_cache()
+            finally:
+                # 恢复tqdm设置
+                os.environ['TQDM_DISABLE'] = old_tqdm_disable
             
             fake_images = torch.cat(fake_images, dim=0)[:num_samples]
             self._check_memory("假图像生成完成")
@@ -936,6 +946,19 @@ class LDMTrainer:
         """评估FID分数"""
         print(f"🎯 开始FID评估 (Epoch {epoch + 1})...")
         
+        # 检查磁盘空间
+        output_dir_path = Path(self.output_dir)
+        try:
+            total, used, free = shutil.disk_usage(output_dir_path)
+            free_gb = free / (1024**3)
+            print(f"💾 可用磁盘空间: {free_gb:.1f}GB")
+            
+            if free_gb < 5:  # 小于5GB可用空间
+                print(f"❌ 磁盘空间不足 ({free_gb:.1f}GB)，跳过FID评估")
+                return float('inf')
+        except Exception as e:
+            print(f"⚠️  无法检查磁盘空间: {e}")
+        
         # 预检查显存是否足够
         if torch.cuda.is_available():
             available_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
@@ -999,15 +1022,24 @@ class LDMTrainer:
         else:
             class_labels = None
         
-        print(f"🎨 生成 {num_samples} 张样本图像...")
+        print(f"🎨 正在生成 {num_samples} 张样本图像...")
         
-        # 生成图像
-        generated_images = self.model.sample(
-            num_samples=num_samples,
-            class_labels=class_labels,
-            num_inference_steps=inference_steps,
-            eta=0.0  # DDIM确定性采样
-        )
+        # 临时禁用采样过程的进度条
+        old_tqdm_disable = os.environ.get('TQDM_DISABLE', '0')
+        os.environ['TQDM_DISABLE'] = '1'  # 禁用所有tqdm进度条
+        
+        try:
+            generated_images = self.model.sample(
+                num_samples=num_samples,
+                class_labels=class_labels,
+                num_inference_steps=inference_steps,
+                eta=0.0  # DDIM确定性采样
+            )
+        finally:
+            # 恢复tqdm设置
+            os.environ['TQDM_DISABLE'] = old_tqdm_disable
+        
+        print(f"✅ 样本生成完成")
         
         # 转换到[0, 1]范围
         generated_images = (generated_images + 1.0) / 2.0
@@ -1033,99 +1065,64 @@ class LDMTrainer:
     
     def save_checkpoint(self, epoch: int, is_best: bool = False, is_best_fid: bool = False):
         """保存检查点"""
+        
+        # 检查磁盘空间
+        output_dir_path = Path(self.output_dir)
+        try:
+            total, used, free = shutil.disk_usage(output_dir_path)
+            free_gb = free / (1024**3)
+            required_gb = 4.0  # 预估需要4GB空间（检查点约3.2GB + 缓冲）
+            
+            print(f"💾 磁盘空间检查: 可用 {free_gb:.1f}GB, 需要 {required_gb:.1f}GB")
+            
+            if free_gb < required_gb:
+                print(f"❌ 磁盘空间不足！可用 {free_gb:.1f}GB < 需要 {required_gb:.1f}GB")
+                print(f"🗑️  尝试清理旧检查点...")
+                
+                # 紧急清理：删除除了latest.pth之外的所有旧检查点
+                checkpoints_dir = Path(self.output_dir) / 'checkpoints'
+                if checkpoints_dir.exists():
+                    deleted_files = []
+                    for file in checkpoints_dir.glob("*.pth"):
+                        if file.name not in ['latest.pth']:  # 保留latest.pth
+                            try:
+                                file_size_gb = file.stat().st_size / (1024**3)
+                                file.unlink()
+                                deleted_files.append(f"{file.name} ({file_size_gb:.1f}GB)")
+                            except Exception as e:
+                                print(f"   ⚠️  删除 {file.name} 失败: {e}")
+                    
+                    if deleted_files:
+                        print(f"   🗑️  已删除: {', '.join(deleted_files)}")
+                        
+                        # 重新检查空间
+                        total, used, free = shutil.disk_usage(output_dir_path)
+                        free_gb = free / (1024**3)
+                        print(f"   💾 清理后可用空间: {free_gb:.1f}GB")
+                        
+                        if free_gb < required_gb:
+                            print(f"   ❌ 清理后空间仍不足，跳过保存")
+                            return
+                    else:
+                        print(f"   ⚠️  无可清理文件，跳过保存")
+                        return
+        except Exception as e:
+            print(f"⚠️  磁盘空间检查失败: {e}")
+        
         # 保存最新检查点
         checkpoint_path = os.path.join(self.output_dir, 'checkpoints', 'latest.pth')
-        self.model.save_checkpoint(
-            filepath=checkpoint_path,
-            epoch=epoch,
-            optimizer_state=self.optimizer.state_dict(),
-            scheduler_state=self.scheduler.state_dict() if self.scheduler else None,
-            metrics={'train_history': self.train_history}
-        )
-        
-        # 保存最佳验证损失模型
-        if is_best:
-            best_path = os.path.join(self.output_dir, 'checkpoints', 'best_val_loss.pth')
-            
-            # 删除旧的最佳验证损失模型
-            old_best_path = os.path.join(self.output_dir, 'checkpoints', 'best_val_loss.pth')
-            if os.path.exists(old_best_path):
-                try:
-                    os.remove(old_best_path)
-                    print(f"🗑️  删除旧的最佳验证损失模型")
-                except Exception as e:
-                    print(f"⚠️  删除旧模型失败: {e}")
-            
+        try:
             self.model.save_checkpoint(
-                filepath=best_path,
+                filepath=checkpoint_path,
                 epoch=epoch,
                 optimizer_state=self.optimizer.state_dict(),
                 scheduler_state=self.scheduler.state_dict() if self.scheduler else None,
                 metrics={'train_history': self.train_history}
             )
-            print(f"🏆 最佳验证损失模型已保存: {best_path}")
-        
-        # 保存最佳FID模型
-        if is_best_fid:
-            best_fid_path = os.path.join(self.output_dir, 'checkpoints', 'best_fid.pth')
-            
-            # 删除旧的最佳FID模型
-            old_best_fid_path = os.path.join(self.output_dir, 'checkpoints', 'best_fid.pth')
-            if os.path.exists(old_best_fid_path):
-                try:
-                    os.remove(old_best_fid_path)
-                    print(f"🗑️  删除旧的最佳FID模型")
-                except Exception as e:
-                    print(f"⚠️  删除旧FID模型失败: {e}")
-            
-            self.model.save_checkpoint(
-                filepath=best_fid_path,
-                epoch=epoch,
-                optimizer_state=self.optimizer.state_dict(),
-                scheduler_state=self.scheduler.state_dict() if self.scheduler else None,
-                metrics={'train_history': self.train_history}
-            )
-            print(f"🎯 最佳FID模型已保存: {best_fid_path}")
-        
-        # 定期保存（根据配置）
-        save_every_epochs = self.config.get('save_every_epochs', 10)
-        if (epoch + 1) % save_every_epochs == 0:
-            periodic_path = os.path.join(self.output_dir, 'checkpoints', f'epoch_{epoch+1:03d}.pth')
-            self.model.save_checkpoint(
-                filepath=periodic_path,
-                epoch=epoch,
-                metrics={'train_history': self.train_history}
-            )
-            
-            # 删除旧的定期检查点（保留最近3个）
-            checkpoints_dir = os.path.join(self.output_dir, 'checkpoints')
-            try:
-                # 获取所有epoch检查点文件
-                epoch_files = []
-                for filename in os.listdir(checkpoints_dir):
-                    if filename.startswith('epoch_') and filename.endswith('.pth'):
-                        try:
-                            epoch_num = int(filename.split('_')[1].split('.')[0])
-                            epoch_files.append((epoch_num, filename))
-                        except (ValueError, IndexError):
-                            continue
-                
-                # 按epoch编号排序
-                epoch_files.sort(key=lambda x: x[0])
-                
-                # 删除旧的检查点，保留最近3个
-                if len(epoch_files) > 3:
-                    files_to_delete = epoch_files[:-3]  # 除了最后3个
-                    for epoch_num, filename in files_to_delete:
-                        old_path = os.path.join(checkpoints_dir, filename)
-                        if os.path.exists(old_path):
-                            os.remove(old_path)
-                            print(f"🗑️  删除旧检查点: {filename}")
-                            
-            except Exception as e:
-                print(f"⚠️  清理旧检查点时出错: {e}")
-        
-        print(f"💾 检查点已保存: {checkpoint_path}")
+            print(f"💾 检查点已保存: {checkpoint_path}")
+        except Exception as e:
+            print(f"❌ 保存检查点失败: {e}")
+            return
     
     def train(self, start_epoch: int = 0):
         """主训练循环"""
