@@ -603,12 +603,21 @@ class LDMTrainer:
                 # with a `latent_dist` attribute, which is a DiagonalGaussianDistribution.
                 posterior = temp_vae.encode(images).latent_dist
                 
-                # CHANGED FROM posterior.sample() to posterior.mode()
-                # For fine-tuned VAEs, especially with low KL weight, the learned variance (logvar)
-                # can be large. Using .sample() can lead to an overly large stddev for latents,
-                # resulting in a too-small scaling_factor. Using .mode() (the mean)
-                # is generally more stable for the representative stddev of the latent space.
-                latents = posterior.mode()
+                # 🔧 重要修复：为了与实际编码方式保持一致，这里也使用 .sample()
+                # 但收集多个样本来获得更稳定的统计估计
+                latents = posterior.sample()  # 使用与encode_to_latent相同的方法
+                
+                # 📊 添加调试信息：比较 mode 和 sample 的差异
+                if batch_idx == 0:  # 只在第一个批次打印
+                    latents_mode = posterior.mode()
+                    print(f"   调试信息 - Mode vs Sample:")
+                    print(f"     Mode:   范围[{latents_mode.min():.3f}, {latents_mode.max():.3f}], std={latents_mode.std():.3f}")
+                    print(f"     Sample: 范围[{latents.min():.3f}, {latents.max():.3f}], std={latents.std():.3f}")
+                    
+                    # 检查方差(logvar)的大小，这能解释为什么sample与mode差异很大
+                    logvar = posterior.logvar
+                    print(f"     LogVar: 范围[{logvar.min():.3f}, {logvar.max():.3f}], mean={logvar.mean():.3f}")
+                    print(f"     Var:    范围[{torch.exp(logvar).min():.3f}, {torch.exp(logvar).max():.3f}], mean={torch.exp(logvar).mean():.3f}")
 
                 all_latents.append(latents.cpu()) # Move to CPU to save GPU memory
                 sample_count += latents.shape[0]
