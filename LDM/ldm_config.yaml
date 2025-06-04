@@ -4,7 +4,7 @@
 # 数据配置
 data:
   data_dir: "/kaggle/input/dataset/dataset"  # 数据集路径
-  batch_size: 6                              # 批次大小（保守设置，避免OOM）
+  batch_size: 8                              # 批次大小（保守设置，避免OOM）
   num_workers: 2                             # 数据加载线程数
   image_size: 256                            # 图像尺寸（匹配VAE训练）
 
@@ -32,12 +32,36 @@ diffusion:
 # 训练配置
 training:
   epochs: 50                                 # 训练轮次
-  learning_rate: 0.00008                    # 适当提高学习率（从5e-5提到8e-5）
+  learning_rate: 0.0001                     # 目标学习率
   weight_decay: 0.01                         # 权重衰减
   scheduler: "cosine"                        # 学习率调度器（cosine/step/none）
-  min_lr: 0.000002                          # 提高最小学习率（从1e-6提到2e-6）
-  gradient_clip: 1.0                         # 放松梯度裁剪（从0.5恢复到1.0）
-  auto_update_scaling_factor: true           # 保持自动计算缩放因子（不人为调整）
+  min_lr: 0.000001                           # 最小学习率
+  gradient_clip: 1.0                         # 正常梯度裁剪阈值
+  auto_update_scaling_factor: true           # 自动计算缩放因子
+  progressive_scaling_update: true           # 使用渐进式更新避免梯度震荡
+  
+  # 🔥 新增：预热机制配置
+  warmup:
+    enabled: true                            # 启用预热机制
+    
+    # 学习率预热（针对第一轮）
+    lr_warmup:
+      enabled: true                          # 启用学习率预热
+      warmup_epochs: 2                      # 减少到2轮预热
+      start_lr: 0.00002                     # 更保守的起始学习率（目标LR的20%）
+      warmup_strategy: "linear"              # 预热策略（linear/cosine）
+    
+    # 缩放因子渐进预热
+    scaling_warmup:
+      enabled: true                          # 启用缩放因子预热
+      warmup_epochs: 3                      # 减少到3轮调整
+      adjustment_steps: [0.3, 0.7, 1.0]     # 更保守的调整：30% → 70% → 100%
+    
+    # 梯度裁剪预热（针对第一轮）
+    gradient_warmup:
+      enabled: true                          # 启用梯度裁剪预热
+      warmup_epochs: 1                      # 只在第一轮严格裁剪
+      start_clip: 0.3                       # 第一轮非常严格的梯度裁剪
   
   # 详细数值监控配置（用于调试和验证）
   detailed_monitoring:
@@ -52,9 +76,10 @@ evaluation:
   # FID评估配置
   fid_evaluation:
     enabled: true                              # 是否启用FID评估
-    eval_every_epochs: 10                      # 每隔10个epoch评估一次（减少频率）
-    num_samples: 200                           # 用于FID评估的样本数量（大幅减少）
-    batch_size: 8                              # FID评估时的批次大小（减少）
+    eval_every_epochs: 1                        # 每隔5个epoch评估一次（减少频率）
+    num_real_samples: 1000                      # 用于FID评估的真实样本数量（大幅减少）
+    num_fake_samples: 1000                      # 用于FID评估的生成样本数量（大幅减少）
+    batch_size: 16                              # FID评估时的批次大小（减少）
     inception_batch_size: 8                    # Inception模型的批次大小（减少）
     num_inference_steps: 50                    # 生成样本时的推理步数（减少加速）
     # 低内存模式建议: num_samples: 50, batch_size: 4, inception_batch_size: 4
@@ -84,4 +109,9 @@ data_normalization:
   # 潜变量范围（VAE输出的潜变量）
   latent_range: [-4, 4]                      # 潜变量的典型范围
   # FID评估时的图像范围
-  fid_image_range: [0, 1]                    # FID评估要求的图像范围 
+  fid_image_range: [0, 1]                    # FID评估要求的图像范围
+
+# Kaggle环境配置
+kaggle:
+  vae_checkpoint: "/kaggle/input/vae-model/vae_finetuned_epoch_23.pth"
+  dataset_path: "/kaggle/input/dataset/dataset" 
