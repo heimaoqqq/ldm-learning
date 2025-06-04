@@ -576,36 +576,53 @@ class LDMTrainer:
         print(f"🔍 计算VAE缩放因子 (使用 {num_samples} 个样本)...")
         
         self.vae_model.eval()
-        latent_samples = []
-        
-        # 收集潜变量样本
+        all_latents = []
         sample_count = 0
-        for batch_idx, batch in enumerate(self.train_loader):
-            if isinstance(batch, (list, tuple)) and len(batch) >= 2:
-                images = batch[0]
-            else:
-                images = batch
-            
-            images = images.to(self.device)
-            
-            # 使用VAE编码（不应用缩放因子）
-            with torch.amp.autocast(device_type='cuda', enabled=False):
-                images = images.float()
-                posterior = self.vae_model.encode(images)
-                latents = posterior.latent_dist.sample()  # 原始潜变量，未缩放
-            
-            latent_samples.append(latents.cpu())
-            sample_count += latents.shape[0]
-            
-            if sample_count >= num_samples:
-                break
         
-        if not latent_samples:
+        # Get the VAE model to be used for encoding
+        # It should be the one loaded by LDMTrainer, typically already on the correct device
+        temp_vae = self.vae_model 
+        temp_vae.eval() # Ensure it's in evaluation mode
+
+        print(f"🔍 计算缩放因子：从 {len(self.train_loader)} 个批次中处理最多 {num_samples} 个样本...")
+        with torch.no_grad(): # Crucial: no gradients needed here
+            for batch_idx, batch_data in enumerate(self.train_loader):
+                # Try to gracefully handle different batch structures
+                if isinstance(batch_data, (list, tuple)) and len(batch_data) > 0:
+                    images = batch_data[0]
+                elif torch.is_tensor(batch_data):
+                    images = batch_data
+                else:
+                    print(f"⚠️  跳过无法解析的批次数据类型: {type(batch_data)}")
+                    continue
+                
+                images = images.to(self.device) # Move images to the correct device
+
+                # Encode using the VAE
+                # The VAE (AutoencoderKL from diffusers) encode method returns an object
+                # with a `latent_dist` attribute, which is a DiagonalGaussianDistribution.
+                posterior = temp_vae.encode(images).latent_dist
+                
+                # CHANGED FROM posterior.sample() to posterior.mode()
+                # For fine-tuned VAEs, especially with low KL weight, the learned variance (logvar)
+                # can be large. Using .sample() can lead to an overly large stddev for latents,
+                # resulting in a too-small scaling_factor. Using .mode() (the mean)
+                # is generally more stable for the representative stddev of the latent space.
+                latents = posterior.mode()
+
+                all_latents.append(latents.cpu()) # Move to CPU to save GPU memory
+                sample_count += latents.shape[0]
+                
+                if sample_count >= num_samples:
+                    print(f"   已收集 {sample_count} 个潜变量样本，停止收集。")
+                    break
+        
+        if not all_latents:
             print("⚠️  无法收集潜变量样本，使用默认缩放因子")
             return 0.18215
         
         # 合并所有样本
-        all_latents = torch.cat(latent_samples, dim=0)[:num_samples]
+        all_latents = torch.cat(all_latents, dim=0)[:num_samples]
         
         # 计算统计信息
         mean = all_latents.mean()
