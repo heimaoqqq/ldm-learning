@@ -13,8 +13,28 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from omegaconf import OmegaConf
 from pathlib import Path
 
+def find_taming_path():
+    """自动查找taming-transformers路径"""
+    possible_paths = [
+        Path("../taming-transformers-master"),
+        Path("../taming-transformers"),
+        Path("./taming-transformers-master"),
+        Path("./taming-transformers")
+    ]
+    
+    for path in possible_paths:
+        if path.exists() and (path / "taming").exists():
+            return str(path.resolve())
+    
+    return None
+
 # 添加taming-transformers到路径
-sys.path.insert(0, str(Path("../taming-transformers-master").resolve()))
+taming_path = find_taming_path()
+if taming_path:
+    sys.path.insert(0, taming_path)
+    print(f"✅ 找到taming-transformers: {taming_path}")
+else:
+    print("❌ 未找到taming-transformers，请先运行kaggle_vqvae_setup.py")
 
 def main():
     print("🚀 开始VQ-VAE训练 (基于官方taming-transformers)")
@@ -34,7 +54,7 @@ def main():
         print("✅ 成功导入taming.models.vqgan.VQModel")
     except ImportError as e:
         print(f"❌ 导入失败: {e}")
-        print("请检查taming-transformers-master路径")
+        print("请先运行 kaggle_vqvae_setup.py 设置环境")
         return
     
     # 导入自定义数据模块
@@ -43,12 +63,14 @@ def main():
         print("✅ 成功导入KaggleDataModule")
     except ImportError as e:
         print(f"❌ 导入kaggle_dataset失败: {e}")
+        print("请先运行 kaggle_vqvae_setup.py 设置环境")
         return
     
     # 加载配置
     config_path = "configs/kaggle_p100_vqgan.yaml"
     if not os.path.exists(config_path):
         print(f"❌ 配置文件不存在: {config_path}")
+        print("请先运行 kaggle_vqvae_setup.py 设置环境")
         return
         
     config = OmegaConf.load(config_path)
