@@ -1368,6 +1368,9 @@ def main():
     # 加载配置
     config = load_config(config_path)
     
+    # 确保使用正确的数据路径（Kaggle环境）
+    config['data']['data_dir'] = "/kaggle/input/dataset/dataset"
+    
     # 创建训练器
     trainer = LDMTrainer(
         config=config,
