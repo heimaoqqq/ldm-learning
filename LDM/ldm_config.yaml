@@ -55,7 +55,7 @@ training:
     scaling_warmup:
       enabled: true                          # 启用缩放因子预热
       warmup_epochs: 3                      # 减少到3轮调整
-      adjustment_steps: [0.6, 0.85, 1.0]     # 更积极的调整：50% → 80% → 100%
+      adjustment_steps: [0.7, 0.9, 1.0]     # 最积极调整：70% → 90% → 100%
       tolerance: 0.1
     
     # 梯度裁剪预热（针对第一轮）
@@ -77,7 +77,7 @@ evaluation:
   # FID评估配置
   fid_evaluation:
     enabled: true                              # 是否启用FID评估
-    eval_every_epochs: 1                        # 每隔5个epoch评估一次（减少频率）
+    eval_every_epochs: 5                        # 每隔5个epoch评估一次（减少频率）
     num_real_samples: 500                      # 用于FID评估的真实样本数量（大幅减少）
     num_fake_samples: 500                      # 用于FID评估的生成样本数量（大幅减少）
     batch_size: 16                              # FID评估时的批次大小（减少）
