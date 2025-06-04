@@ -150,22 +150,22 @@ class LatentDiffusionModel(nn.Module):
     @torch.no_grad()
     def encode_to_latent(self, images: torch.Tensor) -> torch.Tensor:
         """
-        将图像编码到潜在空间
+        将图像编码为潜在表示
         
         Args:
-            images: [B, 3, H, W] 输入图像，范围[-1, 1]
+            images: [B, 3, H, W] 输入图像，范围 [-1, 1]
             
         Returns:
-            latents: [B, 4, h, w] 潜在表示，已经按scaling_factor缩放
+            latents: [B, 4, h, w] 缩放后的潜在表示
         """
-        self.vae.eval()
-        
         # VAE编码
         posterior = self.vae.encode(images).latent_dist
-        latents = posterior.sample()  # [B, 4, h, w]
         
-        # ⚠️ 重要修复：diffusers.AutoencoderKL的sample()方法并不会自动应用scaling_factor
-        # 需要手动乘以scaling_factor来将潜变量缩放到合适的范围供扩散模型使用
+        # 🔧 重要修复：使用确定性的 mode() 而不是随机的 sample()
+        # 这样可以避免训练过程中的额外随机性，提高稳定性
+        latents = posterior.mode()  # 使用分布的众数（确定性）
+        
+        # 应用缩放因子
         latents = latents * self.scaling_factor
         
         return latents
