@@ -3,7 +3,7 @@
 
 # 数据配置
 data:
-  data_dir: "/kaggle/input/dataset/dataset"  # 数据集路径
+  data_dir: "/kaggle/input/dataset"  # 数据集路径
   batch_size: 8                              # 批次大小（保守设置，避免OOM）
   num_workers: 2                             # 数据加载线程数
   image_size: 256                            # 图像尺寸（匹配VAE训练）
