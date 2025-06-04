@@ -164,9 +164,9 @@ class LatentDiffusionModel(nn.Module):
         posterior = self.vae.encode(images).latent_dist
         latents = posterior.sample()  # [B, 4, h, w]
         
-        # 注意：AutoencoderKL的sample()方法已经内置了scaling_factor缩放
-        # 对于标准的SD 1.5 VAE，scaling_factor=0.18215已经在sample()中应用
-        # 微调后的VAE保持了这个行为，所以我们直接返回
+        # ⚠️ 重要修复：diffusers.AutoencoderKL的sample()方法并不会自动应用scaling_factor
+        # 需要手动乘以scaling_factor来将潜变量缩放到合适的范围供扩散模型使用
+        latents = latents * self.scaling_factor
         
         return latents
 
@@ -183,10 +183,12 @@ class LatentDiffusionModel(nn.Module):
         """
         self.vae.eval()
         
+        # ⚠️ 重要修复：VAE解码前需要先除以scaling_factor，恢复原始潜变量范围
+        # 因为VAE期望接收未缩放的潜变量
+        unscaled_latents = latents / self.scaling_factor
+        
         # VAE解码
-        # AutoencoderKL的decode()方法期望输入已经是正确缩放的latents
-        # 即：原始latents * 0.18215（这已经在encode时完成）
-        images = self.vae.decode(latents).sample
+        images = self.vae.decode(unscaled_latents).sample
         
         # 确保输出在正确范围
         images = torch.clamp(images, -1.0, 1.0)
