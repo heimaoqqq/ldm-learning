@@ -80,8 +80,8 @@ evaluation:
     eval_every_epochs: 5                        # 每隔5个epoch评估一次（减少频率）
     num_real_samples: 500                      # 大幅减少样本数量
     num_fake_samples: 500                      # 大幅减少样本数量
-    batch_size: 4                              # 极小批次大小
-    inception_batch_size: 4                    # 极小Inception批次
+    batch_size: 6                              # 极小批次大小
+    inception_batch_size: 6                    # 极小Inception批次
     num_inference_steps: 50                    # 减少推理步数
     # 紧急低内存模式: 总共400张图片，批次4+2
     
