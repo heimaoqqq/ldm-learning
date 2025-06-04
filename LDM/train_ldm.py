@@ -373,6 +373,9 @@ class LDMTrainer:
         # 初始化优化器
         self._init_optimizer()
         
+        # 🔥 新增：初始化预热机制
+        self._init_warmup()
+        
         # 初始化数据加载器
         self._init_dataloader()
         
@@ -393,6 +396,9 @@ class LDMTrainer:
         # 最佳验证损失和FID
         self.best_val_loss = float('inf')
         self.best_fid_score = float('inf')
+        
+        # 🔥 预热相关状态
+        self.optimal_scaling_factor = None  # 存储目标缩放因子
         
     def _init_model(self):
         """初始化模型"""
@@ -460,6 +466,122 @@ class LDMTrainer:
         if self.scheduler:
             print(f"📉 学习率调度器: {scheduler_type}")
         
+    def _init_warmup(self):
+        """初始化预热机制"""
+        train_config = self.config.get('training', {})
+        warmup_config = train_config.get('warmup', {})
+        
+        self.warmup_enabled = warmup_config.get('enabled', False)
+        
+        if self.warmup_enabled:
+            print("🔥 初始化预热机制...")
+            
+            # 学习率预热配置
+            lr_warmup = warmup_config.get('lr_warmup', {})
+            self.lr_warmup_enabled = lr_warmup.get('enabled', False)
+            self.lr_warmup_epochs = lr_warmup.get('warmup_epochs', 3)
+            self.lr_warmup_start = lr_warmup.get('start_lr', 1e-5)
+            self.lr_warmup_strategy = lr_warmup.get('warmup_strategy', 'linear')
+            self.target_lr = train_config.get('learning_rate', 1e-4)
+            
+            # 缩放因子预热配置
+            scaling_warmup = warmup_config.get('scaling_warmup', {})
+            self.scaling_warmup_enabled = scaling_warmup.get('enabled', False)
+            self.scaling_warmup_epochs = scaling_warmup.get('warmup_epochs', 5)
+            self.scaling_adjustment_steps = scaling_warmup.get('adjustment_steps', [0.2, 0.4, 0.6, 0.8, 1.0])
+            
+            # 梯度裁剪预热配置
+            gradient_warmup = warmup_config.get('gradient_warmup', {})
+            self.gradient_warmup_enabled = gradient_warmup.get('enabled', False)
+            self.gradient_warmup_epochs = gradient_warmup.get('warmup_epochs', 2)
+            self.gradient_warmup_clip = gradient_warmup.get('start_clip', 0.5)
+            self.gradient_normal_clip = train_config.get('gradient_clip', 1.0)
+            
+            print(f"   📈 学习率预热: {self.lr_warmup_enabled} ({self.lr_warmup_epochs} epochs, {self.lr_warmup_start:.2e} → {self.target_lr:.2e})")
+            print(f"   🎯 缩放因子预热: {self.scaling_warmup_enabled} ({self.scaling_warmup_epochs} epochs)")
+            print(f"   ✂️  梯度裁剪预热: {self.gradient_warmup_enabled} ({self.gradient_warmup_epochs} epochs, {self.gradient_warmup_clip} → {self.gradient_normal_clip})")
+        else:
+            # 禁用预热时的默认值
+            self.lr_warmup_enabled = False
+            self.scaling_warmup_enabled = False
+            self.gradient_warmup_enabled = False
+            self.target_lr = train_config.get('learning_rate', 1e-4)
+            self.gradient_normal_clip = train_config.get('gradient_clip', 1.0)
+            
+    def get_warmup_lr(self, epoch: int) -> float:
+        """计算预热期间的学习率"""
+        if not self.lr_warmup_enabled or epoch >= self.lr_warmup_epochs:
+            return self.target_lr
+            
+        if self.lr_warmup_strategy == 'linear':
+            # 线性预热
+            warmup_ratio = (epoch + 1) / self.lr_warmup_epochs
+            lr = self.lr_warmup_start + (self.target_lr - self.lr_warmup_start) * warmup_ratio
+        elif self.lr_warmup_strategy == 'cosine':
+            # 余弦预热
+            warmup_ratio = (epoch + 1) / self.lr_warmup_epochs
+            lr = self.lr_warmup_start + (self.target_lr - self.lr_warmup_start) * (1 - np.cos(warmup_ratio * np.pi)) / 2
+        else:
+            lr = self.target_lr
+            
+        return lr
+    
+    def get_warmup_scaling_factor(self, epoch: int) -> Optional[float]:
+        """计算预热期间的缩放因子调整"""
+        if not self.scaling_warmup_enabled or self.optimal_scaling_factor is None:
+            return None
+            
+        if epoch >= self.scaling_warmup_epochs:
+            return self.optimal_scaling_factor
+            
+        # 确保不超出调整步骤列表范围
+        step_idx = min(epoch, len(self.scaling_adjustment_steps) - 1)
+        adjustment_ratio = self.scaling_adjustment_steps[step_idx]
+        
+        current_factor = self.model.scaling_factor
+        target_factor = self.optimal_scaling_factor
+        
+        new_factor = current_factor + (target_factor - current_factor) * adjustment_ratio
+        return new_factor
+    
+    def get_warmup_gradient_clip(self, epoch: int) -> float:
+        """计算预热期间的梯度裁剪阈值"""
+        if not self.gradient_warmup_enabled or epoch >= self.gradient_warmup_epochs:
+            return self.gradient_normal_clip
+            
+        # 在预热期间直接使用严格的梯度裁剪值
+        # 这样第一轮就使用最严格的裁剪，避免梯度爆炸
+        return self.gradient_warmup_clip
+    
+    def apply_warmup_adjustments(self, epoch: int):
+        """应用预热期间的各种调整"""
+        adjustments_made = []
+        
+        # 1. 学习率调整
+        if self.lr_warmup_enabled and epoch < self.lr_warmup_epochs:
+            warmup_lr = self.get_warmup_lr(epoch)
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = warmup_lr
+            adjustments_made.append(f"学习率: {warmup_lr:.2e}")
+        
+        # 2. 缩放因子调整
+        if self.scaling_warmup_enabled and epoch < self.scaling_warmup_epochs:
+            new_scaling_factor = self.get_warmup_scaling_factor(epoch)
+            if new_scaling_factor is not None:
+                old_factor = self.model.scaling_factor
+                self.model.scaling_factor = new_scaling_factor
+                adjustments_made.append(f"缩放因子: {old_factor:.6f} → {new_scaling_factor:.6f}")
+        
+        # 3. 梯度裁剪调整
+        if self.gradient_warmup_enabled and epoch < self.gradient_warmup_epochs:
+            warmup_clip = self.get_warmup_gradient_clip(epoch)
+            adjustments_made.append(f"梯度裁剪: {warmup_clip:.3f}")
+        
+        if adjustments_made:
+            print(f"🔥 第 {epoch+1} 轮预热调整: {', '.join(adjustments_made)}")
+        
+        return len(adjustments_made) > 0
+    
     def _init_dataloader(self):
         """初始化数据加载器"""
         data_config = self.config.get('data', {})
@@ -603,21 +725,22 @@ class LDMTrainer:
                 # with a `latent_dist` attribute, which is a DiagonalGaussianDistribution.
                 posterior = temp_vae.encode(images).latent_dist
                 
-                # 🔧 重要修复：为了与实际编码方式保持一致，这里也使用 .sample()
-                # 但收集多个样本来获得更稳定的统计估计
-                latents = posterior.sample()  # 使用与encode_to_latent相同的方法
+                # 🔧 重要修复：改用确定性的 mode() 而不是随机的 sample()
+                # 这样与训练时的 encode_to_latent 保持一致，避免统计偏差
+                latents = posterior.mode()  # 使用分布的众数（确定性）
                 
                 # 📊 添加调试信息：比较 mode 和 sample 的差异
                 if batch_idx == 0:  # 只在第一个批次打印
-                    latents_mode = posterior.mode()
+                    latents_sample = posterior.sample()
                     print(f"   调试信息 - Mode vs Sample:")
-                    print(f"     Mode:   范围[{latents_mode.min():.3f}, {latents_mode.max():.3f}], std={latents_mode.std():.3f}")
-                    print(f"     Sample: 范围[{latents.min():.3f}, {latents.max():.3f}], std={latents.std():.3f}")
+                    print(f"     Mode:   范围[{latents.min():.3f}, {latents.max():.3f}], std={latents.std():.3f}")
+                    print(f"     Sample: 范围[{latents_sample.min():.3f}, {latents_sample.max():.3f}], std={latents_sample.std():.3f}")
                     
                     # 检查方差(logvar)的大小，这能解释为什么sample与mode差异很大
                     logvar = posterior.logvar
                     print(f"     LogVar: 范围[{logvar.min():.3f}, {logvar.max():.3f}], mean={logvar.mean():.3f}")
                     print(f"     Var:    范围[{torch.exp(logvar).min():.3f}, {torch.exp(logvar).max():.3f}], mean={torch.exp(logvar).mean():.3f}")
+                    print(f"   ✅ 使用确定性 mode() 进行缩放因子计算")
 
                 all_latents.append(latents.cpu()) # Move to CPU to save GPU memory
                 sample_count += latents.shape[0]
@@ -652,16 +775,77 @@ class LDMTrainer:
         current_factor = self.model.scaling_factor
         factor_diff = abs(optimal_scaling_factor - current_factor) / current_factor
         
+        # 🔥 存储最优缩放因子供预热机制使用
+        self.optimal_scaling_factor = optimal_scaling_factor
+        
         if factor_diff > 0.1:  # 差异超过10%
-            print(f"⚠️  缩放因子差异较大 ({factor_diff*100:.1f}%)，建议更新")
-        else:
-            print(f"✅ 缩放因子差异较小 ({factor_diff*100:.1f}%)，当前设置合适")
+            print(f"\n⚠️  缩放因子差异较大，建议更新")
+            
+            # 检查是否启用了缩放因子预热
+            if self.scaling_warmup_enabled:
+                print(f"🔥 将在预热期间渐进调整缩放因子")
+                # 预热模式下不立即更新，等待预热机制处理
+                return optimal_scaling_factor
+            
+            # 非预热模式下的原有逻辑
+            auto_update = self.config.get('auto_update_scaling_factor', True)
+            if auto_update:
+                print(f"🔄 渐进式更新缩放因子以避免梯度震荡...")
+                old_factor = self.model.scaling_factor
+                
+                # 🔧 重要修复：使用渐进式更新而不是直接更新
+                # 避免第一轮训练时的数值震荡
+                progressive_update = self.config.get('progressive_scaling_update', True)
+                if progressive_update and factor_diff > 0.5:  # 差异超过50%时使用渐进更新
+                    # 只更新50%的差异，剩余的会在后续epochs中逐步调整
+                    update_ratio = 0.5
+                    new_factor = old_factor + (optimal_scaling_factor - old_factor) * update_ratio
+                    print(f"   使用渐进更新 (50%): {old_factor:.6f} → {new_factor:.6f}")
+                    print(f"   (完全更新需要: {optimal_scaling_factor:.6f})")
+                else:
+                    # 差异不大，直接更新
+                    new_factor = optimal_scaling_factor
+                    print(f"   使用完全更新: {old_factor:.6f} → {new_factor:.6f}")
+                
+                self.model.scaling_factor = new_factor
+                print(f"✅ 缩放因子已更新")
+                
+                # 验证更新效果
+                print(f"\n🔬 验证更新效果:")
+                with torch.no_grad():
+                    # 测试一个小批次的编码
+                    test_batch = next(iter(self.train_loader))
+                    if isinstance(test_batch, (list, tuple)):
+                        test_images = test_batch[0][:4]  # 取4张图片测试
+                    else:
+                        test_images = test_batch[:4]
+                    
+                    test_images = test_images.to(self.device)
+                    posterior = self.vae_model.encode(test_images)
+                    test_latents = posterior.latent_dist.mode() * self.model.scaling_factor
+                    
+                    test_mean = test_latents.mean().item()
+                    test_std = test_latents.std().item()
+                    print(f"   编码测试结果: 均值={test_mean:.4f}, 标准差={test_std:.4f}")
+                    
+                    if 0.8 <= test_std <= 1.2:
+                        print(f"   ✅ 缩放效果良好 (标准差接近1.0)")
+                    elif test_std < 0.8:
+                        print(f"   ⚠️  标准差偏小 ({test_std:.4f})，可能影响生成质量")
+                    else:
+                        print(f"   ⚠️  标准差偏大 ({test_std:.4f})，可能影响训练稳定性")
+            else:
+                print(f"⚠️  建议手动更新配置中的缩放因子")
         
         return optimal_scaling_factor
 
     def train_epoch(self, epoch: int) -> float:
         """训练一个epoch"""
         self.model.train()
+        
+        # 🔥 应用预热调整
+        warmup_applied = self.apply_warmup_adjustments(epoch)
+        
         total_loss = 0.0
         num_batches = len(self.train_loader)
         
@@ -677,8 +861,13 @@ class LDMTrainer:
         monitor_batches = monitoring_config.get('monitor_batches', 5)
         summary_interval = monitoring_config.get('summary_interval', 50)
         
+        # 🔥 获取当前epoch的梯度裁剪值
+        current_gradient_clip = self.get_warmup_gradient_clip(epoch)
+        
         if detailed_monitoring:
             print(f"\n🔍 第 {epoch+1} 轮详细监控:")
+            if warmup_applied:
+                print(f"🔥 预热状态：学习率={self.optimizer.param_groups[0]['lr']:.2e}, 梯度裁剪={current_gradient_clip:.3f}")
             latent_stats = {'min': [], 'max': [], 'mean': [], 'std': []}
             noise_stats = {'min': [], 'max': [], 'mean': [], 'std': []}
             pred_stats = {'min': [], 'max': [], 'mean': [], 'std': []}
@@ -793,7 +982,7 @@ class LDMTrainer:
                 print(f"    梯度范数: {total_norm:.6f}, 参数数量: {param_count:,}")
             
             # 梯度裁剪
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.unet.parameters(), max_norm=1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.unet.parameters(), max_norm=current_gradient_clip)
             
             # 优化器步进
             self.optimizer.step()
@@ -807,7 +996,8 @@ class LDMTrainer:
                 'Loss': f'{loss.item():.4f}',
                 'Avg': f'{avg_loss:.4f}',
                 'LR': f'{self.optimizer.param_groups[0]["lr"]:.2e}',
-                'GradNorm': f'{grad_norm:.3f}' if isinstance(grad_norm, (int, float)) else 'N/A'
+                'GradNorm': f'{grad_norm:.3f}' if isinstance(grad_norm, (int, float)) else 'N/A',
+                'Clip': f'{current_gradient_clip:.2f}'  # 🔥 显示当前梯度裁剪值
             })
             
             # 清理显存
@@ -1176,16 +1366,43 @@ class LDMTrainer:
             print(f"   建议缩放因子: {optimal_scaling_factor:.6f}")
             print(f"   相对差异: {factor_diff*100:.1f}%")
             
+            # 🔥 预热机制信息
+            if self.warmup_enabled:
+                print(f"\n🔥 预热机制状态:")
+                if self.lr_warmup_enabled:
+                    print(f"   📈 学习率预热: {self.lr_warmup_epochs} 轮 ({self.lr_warmup_start:.2e} → {self.target_lr:.2e})")
+                if self.scaling_warmup_enabled:
+                    print(f"   🎯 缩放因子预热: {self.scaling_warmup_epochs} 轮渐进调整")
+                    if factor_diff > 0.1:
+                        print(f"   📊 调整计划: {self.scaling_adjustment_steps}")
+                if self.gradient_warmup_enabled:
+                    print(f"   ✂️  梯度裁剪预热: {self.gradient_warmup_epochs} 轮 ({self.gradient_warmup_clip} → {self.gradient_normal_clip})")
+            
             if factor_diff > 0.1:  # 差异超过10%
                 print(f"\n⚠️  缩放因子差异较大，建议更新")
                 
                 # 自动更新缩放因子（也可以手动确认）
                 auto_update = train_config.get('auto_update_scaling_factor', True)
                 if auto_update:
-                    print(f"🔄 自动更新缩放因子...")
+                    print(f"🔄 渐进式更新缩放因子以避免梯度震荡...")
                     old_factor = self.model.scaling_factor
-                    self.model.scaling_factor = optimal_scaling_factor
-                    print(f"✅ 缩放因子已更新: {old_factor:.6f} → {optimal_scaling_factor:.6f}")
+                    
+                    # 🔧 重要修复：使用渐进式更新而不是直接更新
+                    # 避免第一轮训练时的数值震荡
+                    progressive_update = train_config.get('progressive_scaling_update', True)
+                    if progressive_update and factor_diff > 0.5:  # 差异超过50%时使用渐进更新
+                        # 只更新50%的差异，剩余的会在后续epochs中逐步调整
+                        update_ratio = 0.5
+                        new_factor = old_factor + (optimal_scaling_factor - old_factor) * update_ratio
+                        print(f"   使用渐进更新 (50%): {old_factor:.6f} → {new_factor:.6f}")
+                        print(f"   (完全更新需要: {optimal_scaling_factor:.6f})")
+                    else:
+                        # 差异不大，直接更新
+                        new_factor = optimal_scaling_factor
+                        print(f"   使用完全更新: {old_factor:.6f} → {new_factor:.6f}")
+                
+                    self.model.scaling_factor = new_factor
+                    print(f"✅ 缩放因子已更新")
                     
                     # 验证更新效果
                     print(f"\n🔬 验证更新效果:")
@@ -1199,7 +1416,7 @@ class LDMTrainer:
                         
                         test_images = test_images.to(self.device)
                         posterior = self.vae_model.encode(test_images)
-                        test_latents = posterior.latent_dist.sample() * self.model.scaling_factor
+                        test_latents = posterior.latent_dist.mode() * self.model.scaling_factor
                         
                         test_mean = test_latents.mean().item()
                         test_std = test_latents.std().item()
