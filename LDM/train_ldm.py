@@ -582,6 +582,44 @@ class LDMTrainer:
         
         return len(adjustments_made) > 0
     
+    def dynamic_scaling_adjustment(self, epoch: int, latent_std: float):
+        """🔧 新增：动态缩放因子调整
+        
+        Args:
+            epoch: 当前轮次
+            latent_std: 当前潜变量标准差
+        """
+        # 只在预热期间进行动态调整
+        if not self.scaling_warmup_enabled or epoch >= self.scaling_warmup_epochs:
+            return False
+            
+        target_std = 1.0  # 目标标准差
+        tolerance = 0.15  # 容忍度：0.85-1.15范围内不调整
+        
+        if abs(latent_std - target_std) > tolerance:
+            # 计算需要的调整比例
+            adjustment_factor = target_std / latent_std
+            new_scaling_factor = self.model.scaling_factor * adjustment_factor
+            
+            # 限制单次调整幅度，避免过度震荡
+            max_adjustment = 1.2  # 最大20%调整
+            min_adjustment = 0.8   # 最小-20%调整
+            
+            if adjustment_factor > max_adjustment:
+                adjustment_factor = max_adjustment
+                new_scaling_factor = self.model.scaling_factor * max_adjustment
+            elif adjustment_factor < min_adjustment:
+                adjustment_factor = min_adjustment
+                new_scaling_factor = self.model.scaling_factor * min_adjustment
+            
+            old_factor = self.model.scaling_factor
+            self.model.scaling_factor = new_scaling_factor
+            
+            print(f"🎯 动态缩放调整: std={latent_std:.3f} → 缩放因子: {old_factor:.6f} → {new_scaling_factor:.6f} (×{adjustment_factor:.3f})")
+            return True
+        
+        return False
+    
     def _init_dataloader(self):
         """初始化数据加载器"""
         data_config = self.config.get('data', {})
@@ -1011,6 +1049,13 @@ class LDMTrainer:
         # 详细监控：epoch结束总结
         if detailed_monitoring:
             self._print_epoch_monitoring_summary(epoch, latent_stats, noise_stats, pred_stats, loss_components, gradient_norms)
+            
+            # 🔧 新增：动态缩放因子调整
+            if latent_stats['std']:
+                current_latent_std = np.mean(latent_stats['std'])
+                adjustment_made = self.dynamic_scaling_adjustment(epoch, current_latent_std)
+                if adjustment_made:
+                    print(f"✅ 缩放因子已动态调整，下一轮将使用新的缩放因子")
         
         return total_loss / num_batches
     
