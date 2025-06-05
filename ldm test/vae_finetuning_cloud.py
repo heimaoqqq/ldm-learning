@@ -978,6 +978,220 @@ def create_emergency_low_memory_finetuner(data_dir):
 
 print("DEBUG PY: Reached point 2 - Before Kaggle main() definition.")
 
+def create_kaggle_trainer(data_dir, images_dir, annotations_dir):
+    """创建适用于Kaggle P100 GPU的高性能训练器"""
+    print("🚀 配置Kaggle P100 GPU训练器...")
+    
+    class KaggleOxfordPetDataset(Dataset):
+        """适配Kaggle路径的Oxford-IIIT Pet数据集类"""
+        
+        def __init__(self, images_dir, annotation_file, transform=None):
+            self.images_dir = images_dir
+            self.transform = transform
+            
+            self.samples = []
+            with open(annotation_file, 'r') as f:
+                for line in f:
+                    if line.startswith('#'):
+                        continue
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        image_id = parts[0]
+                        class_id = int(parts[1]) - 1
+                        self.samples.append((image_id, class_id))
+            print(f"加载了 {len(self.samples)} 个样本")
+        
+        def __len__(self):
+            return len(self.samples)
+        
+        def __getitem__(self, idx):
+            image_id, class_id = self.samples[idx]
+            img_path = os.path.join(self.images_dir, f"{image_id}.jpg")
+            if not os.path.exists(img_path):
+                for ext in ['.jpeg', '.png', '.JPEG', '.PNG']:
+                    alt_path = os.path.join(self.images_dir, f"{image_id}{ext}")
+                    if os.path.exists(alt_path):
+                        img_path = alt_path
+                        break
+            try:
+                image = Image.open(img_path).convert('RGB')
+                if self.transform:
+                    image = self.transform(image)
+                return image, class_id
+            except Exception as e:
+                print(f"错误加载图像 {img_path}: {e}")
+                placeholder = torch.zeros((3, 256, 256))
+                return placeholder, class_id
+    
+    class KaggleVAEFineTuner(CloudVAEFineTuner):
+        def __init__(self, data_dir, images_dir, annotations_dir):
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            print(f"🚀 Kaggle P100 - VAE Fine-tuning 设备: {self.device}")
+            self.config = {
+                'batch_size': 12,
+                'gradient_accumulation_steps': 2,
+                'learning_rate': 1e-5,
+                'weight_decay': 0.01,
+                'max_epochs': 20,
+                'data_dir': data_dir,
+                'images_dir': images_dir,
+                'annotations_dir': annotations_dir,
+                'save_dir': '/kaggle/working/vae_finetuned',
+                'reconstruction_weight': 1.0,
+                'kl_weight': 1e-5,
+                'perceptual_weight': 0.3,
+                'use_perceptual_loss': True,
+                'save_every_epochs': 2,
+                'eval_every_epochs': 2,
+                'use_gradient_checkpointing': True,
+                'mixed_precision': MIXED_PRECISION_AVAILABLE,
+                'image_size': 256,
+            }
+            self.best_model_checkpoint_path = None
+            os.makedirs(self.config['save_dir'], exist_ok=True)
+            transform = transforms.Compose([
+                transforms.Resize((self.config['image_size'], self.config['image_size'])),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+            ])
+            print("📁 加载Kaggle路径的Oxford-IIIT Pet数据集...")
+            train_annotation_file = os.path.join(annotations_dir, "trainval.txt")
+            train_val_dataset = KaggleOxfordPetDataset(
+                images_dir=images_dir,
+                annotation_file=train_annotation_file,
+                transform=transform
+            )
+            train_size = int(len(train_val_dataset) * 0.8)
+            val_size = len(train_val_dataset) - train_size
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                train_val_dataset, [train_size, val_size], 
+                generator=torch.Generator().manual_seed(42)
+            )
+            self.train_loader = DataLoader(
+                train_dataset, 
+                batch_size=self.config['batch_size'], 
+                shuffle=True, 
+                num_workers=2,
+                pin_memory=True,
+                drop_last=True
+            )
+            self.val_loader = DataLoader(
+                val_dataset, 
+                batch_size=self.config['batch_size'], 
+                shuffle=False, 
+                num_workers=2,
+                pin_memory=True
+            )
+            print(f"  训练集: {len(train_dataset)} 张图片")
+            print(f"  验证集: {len(val_dataset)} 张图片")
+            print(f"  图像尺寸: {self.config['image_size']}x{self.config['image_size']}")
+            print(f"  有效batch size: {self.config['batch_size'] * self.config['gradient_accumulation_steps']}")
+            print(f"📦 加载预训练AutoencoderKL...")
+            self.vae = AutoencoderKL.from_pretrained(
+                "runwayml/stable-diffusion-v1-5", 
+                subfolder="vae"
+            ).to(self.device).float()
+            if hasattr(self.vae, 'enable_gradient_checkpointing'):
+                self.vae.enable_gradient_checkpointing()
+                print("✅ VAE梯度检查点已启用")
+            for param in self.vae.parameters():
+                param.requires_grad = True
+            self.setup_optimizer()
+            self.mse_loss = nn.MSELoss()
+            self.setup_perceptual_loss()
+            if self.config['mixed_precision']:
+                self.scaler = GradScaler()
+                print("✅ 混合精度训练已启用")
+            self.train_history = {
+                'epoch': [], 'train_loss': [], 'recon_loss': [],
+                'kl_loss': [], 'perceptual_loss': [], 'val_mse': []
+            }
+            self.clear_memory()
+            print("✅ Kaggle P100训练器初始化完成!")
+            
+        def setup_perceptual_loss(self):
+            if not self.config['use_perceptual_loss']:
+                print("🚫 感知损失已禁用")
+                self.perceptual_net = None
+                return
+            try:
+                from torchvision.models import vgg16, VGG16_Weights
+                self.perceptual_net = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features[:16].to(self.device).float()
+                for param in self.perceptual_net.parameters():
+                    param.requires_grad = False
+                self.perceptual_net.eval()
+                print("✅ VGG16感知损失已设置 (FP32)")
+            except:
+                print("⚠️ VGG16不可用，跳过感知损失")
+                self.perceptual_net = None
+                
+        def compute_perceptual_loss(self, real, fake):
+            if self.perceptual_net is None:
+                return torch.tensor(0.0, device=self.device, dtype=torch.float32)
+            self.perceptual_net.float()
+            real = real.float()
+            fake = fake.float()
+            if real.size(1) == 1:
+                real = real.repeat(1, 3, 1, 1)
+            if fake.size(1) == 1:
+                fake = fake.repeat(1, 3, 1, 1)
+            with torch.no_grad():
+                real_features = self.perceptual_net(real)
+            fake_features = self.perceptual_net(fake)
+            return F.mse_loss(real_features.float(), fake_features.float())
+            
+        def vae_loss(self, images):
+            try:
+                images = images.float()
+                posterior = self.vae.encode(images).latent_dist
+                latents = posterior.sample().float()
+                reconstructed = self.vae.decode(latents).sample.float()
+                recon_loss = self.mse_loss(reconstructed, images)
+                try:
+                    kl_raw = posterior.kl()
+                    if torch.isnan(kl_raw).any() or torch.isinf(kl_raw).any():
+                        print("⚠️ 检测到KL散度中的NaN/Inf值，使用替代计算方法")
+                        mean, var = posterior.mean, posterior.var
+                        eps = 1e-8
+                        kl_loss = 0.5 * torch.mean(mean.pow(2) + var - torch.log(var + eps) - 1)
+                    else:
+                        kl_loss = kl_raw.mean()
+                    if torch.isnan(kl_loss) or torch.isinf(kl_loss):
+                        print("⚠️ KL损失仍然包含NaN/Inf，使用常数替代")
+                        kl_loss = torch.tensor(0.1, device=self.device, dtype=torch.float32)
+                except Exception as kl_e:
+                    print(f"⚠️ KL散度计算错误: {kl_e}，使用替代值")
+                    kl_loss = torch.tensor(0.1, device=self.device, dtype=torch.float32)
+                if self.perceptual_net:
+                    perceptual_loss = self.compute_perceptual_loss(images, reconstructed)
+                else:
+                    perceptual_loss = torch.tensor(0.0, device=self.device, dtype=torch.float32)
+                total_loss = (
+                    self.config['reconstruction_weight'] * recon_loss +
+                    self.config['kl_weight'] * kl_loss +
+                    self.config['perceptual_weight'] * perceptual_loss
+                )
+                if torch.isnan(total_loss) or torch.isinf(total_loss):
+                    print("⚠️ 总损失包含NaN/Inf，仅使用重建损失")
+                    total_loss = self.config['reconstruction_weight'] * recon_loss
+                return {
+                    'total_loss': total_loss,
+                    'recon_loss': recon_loss,
+                    'kl_loss': kl_loss,
+                    'perceptual_loss': perceptual_loss,
+                    'reconstructed': reconstructed,
+                    'latents': latents
+                }
+            except Exception as e:
+                print(f"🔥 VAE_LOSS内部发生错误，类型: {type(e)}, 内容: {e} 🔥")
+                import traceback
+                traceback.print_exc()
+                raise e
+    
+    return KaggleVAEFineTuner(data_dir, images_dir, annotations_dir)
+
+print("DEBUG PY: Reached point 2 - Before Kaggle main() definition.")
+
 def run_kaggle_training():
     print("DEBUG PY: Reached point 3 - Inside Kaggle main() function.")
     print("🌐 启动云VAE Fine-tuning完整训练 (Oxford-IIIT Pet数据集)...")
