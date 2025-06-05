@@ -1067,5 +1067,8 @@ def main():
             return None
 
 print("DEBUG PY: Reached point 4 - Before if __name__ == '__main__'.")
-# if __name__ == "__main__":
-#     main() 
+if __name__ == "__main__":
+    print("DEBUG PY: Reached point 5 - Inside if __name__ == '__main__', calling main().")
+    main()
+
+# import matplotlib.pyplot as plt
