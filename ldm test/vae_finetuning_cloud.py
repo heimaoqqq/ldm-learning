@@ -1054,11 +1054,13 @@ def create_kaggle_trainer(data_dir, images_dir, annotations_dir):
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ])
-            print("📁 加载Kaggle路径的Oxford-IIIT Pet数据集...")
-            train_annotation_file = os.path.join(annotations_dir, "trainval.txt")
+            # 更新日志并确保使用 list.txt
+            print("📁 加载Kaggle路径的Oxford-IIIT Pet数据集 (使用 list.txt 获取所有样本)...")
+            annotation_file_to_load = os.path.join(annotations_dir, "list.txt") 
+            
             train_val_dataset = KaggleOxfordPetDataset(
                 images_dir=images_dir,
-                annotation_file=train_annotation_file,
+                annotation_file=annotation_file_to_load, 
                 transform=transform
             )
             train_size = int(len(train_val_dataset) * 0.8)
