@@ -1,20 +1,9 @@
 """
 VAE Fine-tuning - 云服务器完整版本
-针对微多普勒时频图优化AutoencoderKL
-数据集路径：/kaggle/input/dataset
-"""
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-import os
-import sys
-import gc
-from tqdm import tqdm"""
-VAE Fine-tuning - 云服务器完整版本
 针对Oxford-IIIT Pet数据集优化AutoencoderKL
 数据集路径：/data
 """
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
