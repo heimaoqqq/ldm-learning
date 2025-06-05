@@ -113,15 +113,40 @@ def main():
     run_cmd("pip install torch torchvision torchaudio -q")
     run_cmd("pip install omegaconf==2.1.1 pytorch-lightning==2.0.9 einops==0.4.1 -q")
     
-    # 避免使用需要编译的transformers
-    print("安装预编译的transformers和其他依赖...")
-    run_cmd("pip install --no-build-isolation transformers==4.19.2 -q")
+    # 安装其他依赖
+    print("安装其他依赖...")
     run_cmd("pip install kornia==0.6.5 torchmetrics>=0.6.0 lpips -q")
     run_cmd("pip install albumentations>=1.1.0 -q")
     
-    # 步骤3: 设置latent-diffusion
-    print_step("3", "设置latent-diffusion库")
+    # 步骤3: 设置latent-diffusion和taming-transformers
+    print_step("3", "设置必要的库")
     
+    # 克隆并安装taming-transformers（ldm依赖）
+    print("克隆taming-transformers...")
+    taming_dir = "/kaggle/working/taming-transformers"
+    run_cmd(f"git clone --depth 1 https://github.com/CompVis/taming-transformers.git {taming_dir}")
+    
+    if os.path.exists(taming_dir):
+        print("✓ 成功克隆taming-transformers")
+        # 将taming-transformers添加到PYTHONPATH
+        sys.path.append(taming_dir)
+        # 创建空的setup.py以便安装
+        with open(os.path.join(taming_dir, "setup.py"), "w") as f:
+            f.write("""
+from setuptools import setup, find_packages
+setup(
+    name="taming-transformers",
+    version="0.0.1",
+    packages=find_packages(),
+)
+""")
+        # 安装taming-transformers
+        print("安装taming-transformers...")
+        run_cmd(f"pip install -e {taming_dir} -q")
+    else:
+        print("\033[0;31m克隆taming-transformers失败\033[0m")
+    
+    # 查找或克隆latent-diffusion
     ld_paths = [
         "/kaggle/input/latent-diffusion",
         "/kaggle/input/latentdiffusion",
@@ -182,6 +207,22 @@ def main():
         else:
             print("\033[0;31m从GitHub克隆失败。请手动添加latent-diffusion。\033[0m")
     
+    # 创建符号链接，确保taming可被导入
+    print("创建taming符号链接...")
+    taming_target = "/kaggle/working/latent-diffusion/taming"
+    if os.path.exists(taming_dir) and not os.path.exists(taming_target):
+        if os.path.islink(taming_target):
+            os.unlink(taming_target)
+        try:
+            # 尝试使用符号链接
+            os.symlink(os.path.join(taming_dir, "taming"), taming_target)
+            print("✓ 已创建taming符号链接")
+        except:
+            # 如果符号链接失败，尝试复制
+            if os.path.exists(os.path.join(taming_dir, "taming")):
+                shutil.copytree(os.path.join(taming_dir, "taming"), taming_target)
+                print("✓ 已复制taming目录")
+    
     # 步骤4: 创建VAE目录结构
     print_step("4", "创建VAE目录结构")
     
@@ -213,7 +254,7 @@ def main():
         else:
             print(f"✗ 未找到文件: {file}")
     
-    # 步骤6: 查找并分析数据集
+    # 步骤6: 分析数据集
     print_step("6", "分析数据集")
     
     # 使用专门的宠物图像查找函数
@@ -354,8 +395,69 @@ class ImageLogger:
             f.write(main_py_content)
         print("✓ 已创建main.py")
     
-    # 步骤8: 总结和指导
-    print_step("8", "环境设置完成")
+    # 步骤8: 创建修改版的autoencoder.py（移除taming依赖）
+    print_step("8", "修改LDM代码")
+    
+    # 尝试修改autoencoder.py，移除taming依赖
+    autoencoder_path = "/kaggle/working/latent-diffusion/ldm/models/autoencoder.py"
+    if os.path.exists(autoencoder_path):
+        print("修改autoencoder.py，减少taming依赖...")
+        try:
+            with open(autoencoder_path, 'r') as f:
+                content = f.read()
+            
+            # 添加简单的VectorQuantizer实现
+            if "from taming.modules.vqvae.quantize import VectorQuantizer2 as VectorQuantizer" in content:
+                vq_impl = """
+# 简化版的VectorQuantizer实现，替代taming依赖
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class VectorQuantizer(nn.Module):
+    def __init__(self, n_e, e_dim, beta=0.25, remap=None, unknown_index="random"):
+        super().__init__()
+        self.n_e = n_e
+        self.e_dim = e_dim
+        self.beta = beta
+        self.embedding = nn.Embedding(self.n_e, self.e_dim)
+        self.embedding.weight.data.uniform_(-1.0 / self.n_e, 1.0 / self.n_e)
+
+    def forward(self, z):
+        z = z.permute(0, 2, 3, 1).contiguous()
+        z_flattened = z.view(-1, self.e_dim)
+        
+        d = torch.sum(z_flattened ** 2, dim=1, keepdim=True) + \
+            torch.sum(self.embedding.weight**2, dim=1) - \
+            2 * torch.einsum('bd,dn->bn', z_flattened, self.embedding.weight.t())
+        
+        min_encoding_indices = torch.argmin(d, dim=1)
+        z_q = self.embedding(min_encoding_indices).view(z.shape)
+        
+        # Compute loss
+        loss = torch.mean((z_q.detach() - z)**2) + self.beta * torch.mean((z_q - z.detach())**2)
+        
+        # Straight through
+        z_q = z + (z_q - z).detach()
+        z_q = z_q.permute(0, 3, 1, 2)
+        
+        return z_q, loss, (None, None, min_encoding_indices)
+"""
+                # 替换taming导入
+                content = content.replace(
+                    "from taming.modules.vqvae.quantize import VectorQuantizer2 as VectorQuantizer", 
+                    vq_impl
+                )
+                
+                # 保存修改后的文件
+                with open(autoencoder_path, 'w') as f:
+                    f.write(content)
+                print("✓ 已修改autoencoder.py，减少taming依赖")
+        except Exception as e:
+            print(f"\033[0;31m修改autoencoder.py失败: {e}\033[0m")
+    
+    # 步骤9: 总结和指导
+    print_step("9", "环境设置完成")
     
     print("\n" + "="*50)
     print("\033[1;32mVAE训练环境已设置完成!\033[0m")
