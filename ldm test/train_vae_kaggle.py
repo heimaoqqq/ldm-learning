@@ -82,6 +82,18 @@ except ImportError:
             module_imp = importlib.import_module(module)
             importlib.reload(module_imp)
         return getattr(importlib.import_module(module, package=None), cls)
+        
+    # 添加WrappedDataset类
+    class WrappedDataset(torch.utils.data.Dataset):
+        """将普通数据集包装为索引样本的数据集"""
+        def __init__(self, dataset):
+            self.data = dataset
+
+        def __len__(self):
+            return len(self.data)
+
+        def __getitem__(self, idx):
+            return self.data[idx]
 
     class DataModuleFromConfig(pl.LightningDataModule):
         def __init__(self, batch_size, train=None, validation=None, test=None,
@@ -140,6 +152,7 @@ except ImportError:
     main.instantiate_from_config = instantiate_from_config
     main.DataModuleFromConfig = DataModuleFromConfig
     main.ImageLogger = ImageLogger
+    main.WrappedDataset = WrappedDataset
     sys.modules['main'] = main
     
     print("✓ 已创建main模块的默认实现")
