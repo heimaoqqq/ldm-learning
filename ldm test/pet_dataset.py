@@ -15,20 +15,33 @@ class PetDataset(Dataset):
         self.size = size
         self.split = split
         
-        # 获取所有图像文件 - 适配Kaggle和本地环境
-        if os.path.exists(os.path.join(data_root, 'images')):
-            # 本地环境
-            self.image_paths = glob.glob(os.path.join(data_root, 'images', '*.jpg'))
-        else:
-            # Kaggle环境 - 直接在根目录查找
-            self.image_paths = glob.glob(os.path.join(data_root, '*.jpg'))
-            if not self.image_paths:
-                # 尝试其他可能的子目录
-                for subdir in ['Images', 'pets', 'oxford_iiit_pet']:
-                    potential_path = os.path.join(data_root, subdir, '*.jpg')
-                    self.image_paths = glob.glob(potential_path)
-                    if self.image_paths:
-                        break
+        # 适配Oxford-IIIT Pet数据集在Kaggle的结构
+        # 尝试各种可能的路径模式
+        potential_paths = [
+            os.path.join(data_root, 'images', 'images', '*.jpg'),  # /kaggle/input/the-oxfordiiit-pet-dataset/images/images/*.jpg
+            os.path.join(data_root, 'images', '*.jpg'),            # /kaggle/input/the-oxfordiiit-pet-dataset/images/*.jpg
+            os.path.join(data_root, '*.jpg'),                      # /kaggle/input/the-oxfordiiit-pet-dataset/*.jpg
+        ]
+        
+        self.image_paths = []
+        for path_pattern in potential_paths:
+            files = glob.glob(path_pattern)
+            if files:
+                self.image_paths = files
+                print(f"找到图像文件: {path_pattern} ({len(files)}张)")
+                break
+                
+        # 如果还是找不到，递归搜索所有子目录
+        if not self.image_paths:
+            print(f"在初始路径中未找到图像，开始递归搜索...")
+            # 递归搜索所有子目录中的jpg文件
+            for root, dirs, files in os.walk(data_root):
+                for file in files:
+                    if file.lower().endswith(('.jpg', '.jpeg')):
+                        self.image_paths.append(os.path.join(root, file))
+            
+            if self.image_paths:
+                print(f"递归搜索找到 {len(self.image_paths)} 张图像")
         
         # 简单的训练/验证分割 (80/20)
         np.random.seed(42)
