@@ -1,3 +1,4 @@
+# 潜在扩散模型(LDM)训练与推理依赖
 torch>=1.10.0
 torchvision>=0.11.0
 pytorch-lightning==2.0.9
