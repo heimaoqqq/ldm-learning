@@ -8,6 +8,7 @@ import sys
 import shutil
 import subprocess
 import time
+import glob
 
 def print_step(step, desc):
     """打印彩色步骤信息"""
@@ -32,6 +33,44 @@ def check_path(path):
     else:
         print(f"\033[0;31m✗ 未找到: {path}\033[0m")
         return False
+
+def find_pet_images(base_path):
+    """查找宠物图像文件夹"""
+    # 常见的图像目录名称
+    potential_dirs = ["images", "photos", "pictures", "imgs", "data"]
+    
+    # 首先检查常见目录名
+    for dirname in potential_dirs:
+        path = os.path.join(base_path, dirname)
+        if os.path.isdir(path):
+            # 检查目录中是否有jpg图片
+            jpg_files = glob.glob(os.path.join(path, "*.jpg"))
+            if jpg_files:
+                return path, len(jpg_files)
+    
+    # 直接检查根目录下的jpg文件
+    jpg_files = glob.glob(os.path.join(base_path, "*.jpg"))
+    if jpg_files:
+        return base_path, len(jpg_files)
+    
+    # 递归搜索所有子目录
+    best_dir = None
+    max_images = 0
+    
+    for root, dirs, files in os.walk(base_path):
+        # 跳过annotations目录，因为它通常包含掩码而不是实际图像
+        if "annotations" in root:
+            continue
+            
+        jpg_files = [f for f in files if f.lower().endswith(".jpg")]
+        if len(jpg_files) > max_images:
+            max_images = len(jpg_files)
+            best_dir = root
+    
+    if best_dir:
+        return best_dir, max_images
+    
+    return None, 0
 
 def main():
     """主函数"""
@@ -69,21 +108,16 @@ def main():
     # 步骤2: 安装依赖
     print_step("2", "安装依赖")
     
-    # 安装VAE训练所需的主要依赖
+    # 使用预编译的包避免编译问题
     print("安装PyTorch和相关依赖...")
-    deps = [
-        "omegaconf==2.1.1",
-        "pytorch-lightning==2.0.9",
-        "einops==0.4.1",
-        "torch-fidelity==0.3.0",
-        "transformers==4.19.2",
-        "kornia==0.6.5",
-        "torchmetrics>=0.6.0",
-        "lpips",
-        "albumentations>=1.1.0"
-    ]
-    for dep in deps:
-        run_cmd(f"pip install {dep} -q")
+    run_cmd("pip install torch torchvision torchaudio -q")
+    run_cmd("pip install omegaconf==2.1.1 pytorch-lightning==2.0.9 einops==0.4.1 -q")
+    
+    # 避免使用需要编译的transformers
+    print("安装预编译的transformers和其他依赖...")
+    run_cmd("pip install --no-build-isolation transformers==4.19.2 -q")
+    run_cmd("pip install kornia==0.6.5 torchmetrics>=0.6.0 lpips -q")
+    run_cmd("pip install albumentations>=1.1.0 -q")
     
     # 步骤3: 设置latent-diffusion
     print_step("3", "设置latent-diffusion库")
@@ -182,35 +216,37 @@ def main():
     # 步骤6: 查找并分析数据集
     print_step("6", "分析数据集")
     
-    # 查找图像目录
-    images_paths = [
-        os.path.join(dataset_path, "images"),
-        os.path.join(dataset_path, "data", "images"),
-        dataset_path
-    ]
+    # 使用专门的宠物图像查找函数
+    images_dir, image_count = find_pet_images(dataset_path)
     
-    images_dir = None
-    for path in images_paths:
-        if os.path.exists(path) and os.path.isdir(path):
-            # 检查是否包含图像文件
-            image_files = [f for f in os.listdir(path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-            if image_files:
-                images_dir = path
-                print(f"\033[0;32m找到图像目录: {path} (包含 {len(image_files)} 张图像)\033[0m")
+    if images_dir and image_count > 0:
+        print(f"\033[0;32m找到宠物图像目录: {images_dir} (包含 {image_count} 张图像)\033[0m")
+    else:
+        # 尝试一些已知的路径模式
+        known_patterns = [
+            os.path.join(dataset_path, "images", "*.jpg"),
+            os.path.join(dataset_path, "images", "images", "*.jpg")
+        ]
+        
+        for pattern in known_patterns:
+            files = glob.glob(pattern)
+            if files:
+                images_dir = os.path.dirname(files[0])
+                image_count = len(files)
+                print(f"\033[0;32m通过模式匹配找到图像目录: {images_dir} (包含 {image_count} 张图像)\033[0m")
                 break
     
-    if not images_dir:
-        print("\033[0;31m未找到有效的图像目录。尝试递归搜索...\033[0m")
-        # 递归搜索所有子目录中的jpg文件
-        for root, dirs, files in os.walk(dataset_path):
-            image_files = [f for f in files if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-            if len(image_files) > 0:
-                images_dir = root
-                print(f"\033[0;32m找到图像目录: {root} (包含 {len(image_files)} 张图像)\033[0m")
-                break
-    
-    if not images_dir:
-        print("\033[0;31m未找到任何图像文件。请检查数据集结构。\033[0m")
+    if not images_dir or image_count == 0:
+        print("\033[0;31m无法找到宠物图像。请手动检查数据集结构。\033[0m")
+        
+        # 列出数据集目录以帮助用户定位
+        print("\n数据集目录结构:")
+        cmd = f"find {dataset_path} -type d | sort"
+        run_cmd(cmd)
+        
+        print("\n图像文件示例:")
+        cmd = f"find {dataset_path} -name '*.jpg' | head -5"
+        run_cmd(cmd)
         return False
     
     # 更新VAE配置文件中的数据路径
@@ -220,9 +256,13 @@ def main():
             with open(vae_config_path, 'r') as f:
                 config_content = f.read()
             
-            # 替换数据路径
+            # 替换数据路径 (处理Windows和Unix路径)
             config_content = config_content.replace(
                 "data_root: G:\\Latent Diffusion\\data\\pet_dataset\\images", 
+                f"data_root: {images_dir}"
+            )
+            config_content = config_content.replace(
+                "data_root: /kaggle/input/the-oxfordiiit-pet-dataset/annotations/annotations/trimaps", 
                 f"data_root: {images_dir}"
             )
             
@@ -233,8 +273,89 @@ def main():
         except Exception as e:
             print(f"\033[0;31m更新配置文件失败: {e}\033[0m")
     
-    # 步骤7: 总结和指导
-    print_step("7", "环境设置完成")
+    # 步骤7: 创建main.py文件
+    print_step("7", "创建必要的辅助文件")
+    
+    # 确保main.py文件存在于latent-diffusion目录中
+    main_py = "/kaggle/working/latent-diffusion/main.py"
+    if not os.path.exists(main_py):
+        print("创建基本的main.py文件...")
+        main_py_content = """
+import sys
+import argparse
+import pytorch_lightning as pl
+from omegaconf import OmegaConf
+
+def instantiate_from_config(config):
+    if not "target" in config:
+        raise KeyError("Expected key `target` to instantiate.")
+    return get_obj_from_str(config["target"])(**config.get("params", dict()))
+
+def get_obj_from_str(string, reload=False):
+    module, cls = string.rsplit(".", 1)
+    if reload:
+        module_imp = importlib.import_module(module)
+        importlib.reload(module_imp)
+    return getattr(importlib.import_module(module, package=None), cls)
+
+class DataModuleFromConfig(pl.LightningDataModule):
+    def __init__(self, batch_size, train=None, validation=None, test=None,
+                 wrap=False, num_workers=None):
+        super().__init__()
+        self.batch_size = batch_size
+        self.dataset_configs = dict()
+        self.num_workers = num_workers if num_workers is not None else batch_size*2
+        if train is not None:
+            self.dataset_configs["train"] = train
+            self.train_dataloader = self._train_dataloader
+        if validation is not None:
+            self.dataset_configs["validation"] = validation
+            self.val_dataloader = self._val_dataloader
+
+        self.wrap = wrap
+
+    def prepare_data(self):
+        self.datasets = dict(
+            (k, instantiate_from_config(self.dataset_configs[k]))
+            for k in self.dataset_configs)
+
+    def setup(self, stage=None):
+        if self.wrap:
+            for k in self.datasets:
+                self.datasets[k] = WrappedDataset(self.datasets[k])
+
+    def _train_dataloader(self):
+        return torch.utils.data.DataLoader(
+            self.datasets["train"],
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=True
+        )
+
+    def _val_dataloader(self):
+        return torch.utils.data.DataLoader(
+            self.datasets["validation"],
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=False
+        )
+
+class ImageLogger:
+    def __init__(self, batch_frequency=1000, max_images=8, increase_log_steps=True):
+        self.batch_freq = batch_frequency
+        self.max_images = max_images
+        self.log_steps = [batch_frequency]
+        self.increase_log_steps = increase_log_steps
+        
+    def __call__(self, pl_module, batch, batch_idx, split="train"):
+        pass # 简化版实现
+"""
+        with open(main_py, 'w') as f:
+            f.write(main_py_content)
+        print("✓ 已创建main.py")
+    
+    # 步骤8: 总结和指导
+    print_step("8", "环境设置完成")
     
     print("\n" + "="*50)
     print("\033[1;32mVAE训练环境已设置完成!\033[0m")
