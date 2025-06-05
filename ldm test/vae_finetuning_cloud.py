@@ -978,89 +978,59 @@ def create_emergency_low_memory_finetuner(data_dir):
 
 print("DEBUG PY: Reached point 2 - Before Kaggle main() definition.")
 
-def main():
+def run_kaggle_training():
     print("DEBUG PY: Reached point 3 - Inside Kaggle main() function.")
-    """主函数"""
-    print("🌐 启动云VAE Fine-tuning完整训练...")
-    
-    # 设置CUDA内存分配策略
+    print("🌐 启动云VAE Fine-tuning完整训练 (Oxford-IIIT Pet数据集)...")
+
     if torch.cuda.is_available():
-        # 启用内存分片管理
-        torch.cuda.set_per_process_memory_fraction(0.95)  # 使用95%的显存
+        torch.cuda.set_per_process_memory_fraction(0.95)
         torch.cuda.empty_cache()
         print(f"🔧 CUDA内存优化设置完成")
-    
-    # 云环境数据路径
-    data_dir = '/kaggle/input/dataset/dataset'
-    
-    if not os.path.exists(data_dir):
-        print(f"❌ 数据集目录不存在: {data_dir}")
-        return None
-    
-    try:
-        # 创建fine-tuner
-        finetuner = CloudVAEFineTuner(data_dir=data_dir)
-        
-        # 开始完整fine-tuning
-        best_loss = finetuner.finetune()
-        
-        print(f"\n🎯 VAE Fine-tuning完成，最佳重建损失: {best_loss:.4f}")
-        print("💡 VAE已经适配微多普勒时频图域，可以用于LDM训练")
-        
-        return best_loss
 
-    except Exception as e: # Catch broader exceptions for dtype issues first
+    # Kaggle环境数据目录
+    data_dir = '/kaggle/input/dataset-test'
+    images_dir = '/kaggle/input/dataset-test/images/images'
+    annotations_dir = '/kaggle/input/dataset-test/annotations/annotations'
+
+    print(f"📊 数据集路径配置:")
+    print(f"  主目录: {data_dir}")
+    print(f"  图像目录: {images_dir}")
+    print(f"  标注目录: {annotations_dir}")
+
+    if not os.path.exists(images_dir) or not os.path.exists(annotations_dir):
+        print(f"❌ 数据集目录不存在: {images_dir} 或 {annotations_dir}")
+        return None
+
+    try:
+        print("💡 使用P100 GPU高性能配置...")
+        kaggle_trainer = create_kaggle_trainer(data_dir, images_dir, annotations_dir)
+        best_loss = kaggle_trainer.finetune()
+        print(f"\n🎯 P100 GPU VAE Fine-tuning完成，最佳重建损失: {best_loss:.4f}")
+        print("💡 VAE已经适配Oxford-IIIT Pet数据集，可以用于LDM训练")
+        return best_loss
+    except Exception as e:
         print("🔥 Top-level exception caught in main. Full traceback follows: 🔥")
         import traceback
-        traceback.print_exc() # PRINT FULL TRACEBACK IMMEDIATELY
-
+        traceback.print_exc()
         error_str_lower = str(e).lower()
-        # Using original error string for debug print for more context
         print(f"🕵️‍♀️ 捕获到异常详情: 类型={type(e)}, 内容='{str(e)}'")
-
-        dtype_error_keywords = ["unsupported dtype", "dtype", "expected scalar type", "type mismatch"]
-        is_dtype_error = any(keyword in error_str_lower for keyword in dtype_error_keywords)
-
-        if is_dtype_error:
-            print(f"❌ 数据类型相关错误诊断 (已由 traceback.print_exc() 显示详细信息): {e}")
-            print("🔄 检测到数据类型问题，尝试完全禁用混合精度训练重试...")
-            
-            # 清理内存
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
-            
+        if "out of memory" in error_str_lower:
+            print("💡 尝试使用降级配置进行训练...")
             try:
-                print("📦 创建纯FP32精度训练器...")
-                pure_fp32_finetuner = PureFP32CloudVAEFineTuner(data_dir)
-                best_loss = pure_fp32_finetuner.finetune()
-                print(f"\n🎯 纯FP32模式VAE Fine-tuning完成，最佳重建损失: {best_loss:.4f}")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
+                # 确保传递所有正确的路径给降级函数
+                fallback_trainer = create_ultra_low_memory_finetuner(data_dir, images_dir, annotations_dir, use_cpu=False)
+                best_loss = fallback_trainer.finetune()
+                print(f"\n🎯 降级配置VAE Fine-tuning完成，最佳重建损失: {best_loss:.4f}")
                 return best_loss
-            except Exception as fp32_e:
-                print(f"❌ 纯FP32模式也失败了. Full traceback follows: {fp32_e}")
+            except Exception as fallback_e:
+                print(f"❌ 降级配置也失败了: {fallback_e}")
                 traceback.print_exc()
-                return None
-
-        elif "out of memory" in error_str_lower:
-            print(f"❌ 显存不足错误 (已由 traceback.print_exc() 显示详细信息): {e}")
-            # ... (rest of OOM handling remains the same, including its own traceback on failure)
-            print("🆘 启动应急低内存模式...")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
-            try:
-                emergency_finetuner = create_emergency_low_memory_finetuner(data_dir)
-                best_loss = emergency_finetuner.finetune()
-                print(f"\n🎯 应急模式VAE Fine-tuning完成，最佳重建损失: {best_loss:.4f}")
-                return best_loss
-            except Exception as emergency_e:
-                print(f"❌ 应急模式也失败了. Full traceback follows: {emergency_e}")
-                traceback.print_exc()
-                print("💡 最终建议: 1. 重启内核清理所有内存 2. 手动设置batch_size=2 3. 使用CPU训练（非常慢）")
                 return None
         else:
-            print(f"❌ 训练过程中出现未分类的错误 (已由 traceback.print_exc() 显示详细信息): {e}")
-            # Fallback for any other exception, already printed by initial traceback
+            print(f"❌ 训练过程中出现未分类的错误: {e}")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             gc.collect()
@@ -1069,6 +1039,6 @@ def main():
 print("DEBUG PY: Reached point 4 - Before if __name__ == '__main__'.")
 if __name__ == "__main__":
     print("DEBUG PY: Reached point 5 - Inside if __name__ == '__main__', calling main().")
-    main()
+    run_kaggle_training()
 
 # import matplotlib.pyplot as plt
