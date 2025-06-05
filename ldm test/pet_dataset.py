@@ -15,8 +15,20 @@ class PetDataset(Dataset):
         self.size = size
         self.split = split
         
-        # 获取所有图像文件
-        self.image_paths = glob.glob(os.path.join(data_root, 'images', '*.jpg'))
+        # 获取所有图像文件 - 适配Kaggle和本地环境
+        if os.path.exists(os.path.join(data_root, 'images')):
+            # 本地环境
+            self.image_paths = glob.glob(os.path.join(data_root, 'images', '*.jpg'))
+        else:
+            # Kaggle环境 - 直接在根目录查找
+            self.image_paths = glob.glob(os.path.join(data_root, '*.jpg'))
+            if not self.image_paths:
+                # 尝试其他可能的子目录
+                for subdir in ['Images', 'pets', 'oxford_iiit_pet']:
+                    potential_path = os.path.join(data_root, subdir, '*.jpg')
+                    self.image_paths = glob.glob(potential_path)
+                    if self.image_paths:
+                        break
         
         # 简单的训练/验证分割 (80/20)
         np.random.seed(42)
