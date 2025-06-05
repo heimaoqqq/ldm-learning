@@ -74,6 +74,8 @@ except ImportError:
     MIXED_PRECISION_AVAILABLE = False
     print("⚠️  混合精度训练不可用")
 
+print("DEBUG PY: Reached point 1 - After initial setup and mixed precision check.")
+
 class OxfordPetDataset(Dataset):
     """Oxford-IIIT Pet数据集类"""
     
@@ -974,7 +976,10 @@ def create_emergency_low_memory_finetuner(data_dir):
     
     return EmergencyCloudVAEFineTuner(data_dir)
 
+print("DEBUG PY: Reached point 2 - Before Kaggle main() definition.")
+
 def main():
+    print("DEBUG PY: Reached point 3 - Inside Kaggle main() function.")
     """主函数"""
     print("🌐 启动云VAE Fine-tuning完整训练...")
     
@@ -1061,5 +1066,6 @@ def main():
             gc.collect()
             return None
 
+print("DEBUG PY: Reached point 4 - Before if __name__ == '__main__'.")
 # if __name__ == "__main__":
 #     main() 
