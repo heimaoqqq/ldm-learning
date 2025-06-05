@@ -32,12 +32,12 @@ data:
     train:
       target: VAE.pet_dataset.PetDatasetTrain
       params:
-        data_root: /kaggle/input/the-oxfordiiit-pet-dataset
+        data_root: /kaggle/input/the-oxfordiiit-pet-dataset/images
         size: 256
     validation:
       target: VAE.pet_dataset.PetDatasetValidation
       params:
-        data_root: /kaggle/input/the-oxfordiiit-pet-dataset
+        data_root: /kaggle/input/the-oxfordiiit-pet-dataset/images
         size: 256
 
 lightning:
