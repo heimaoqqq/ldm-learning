@@ -323,14 +323,11 @@ setup(
         print("创建基本的main.py文件...")
         main_py_content = """
 import sys
+import importlib
 import argparse
 import pytorch_lightning as pl
+import torch
 from omegaconf import OmegaConf
-
-def instantiate_from_config(config):
-    if not "target" in config:
-        raise KeyError("Expected key `target` to instantiate.")
-    return get_obj_from_str(config["target"])(**config.get("params", dict()))
 
 def get_obj_from_str(string, reload=False):
     module, cls = string.rsplit(".", 1)
@@ -338,6 +335,22 @@ def get_obj_from_str(string, reload=False):
         module_imp = importlib.import_module(module)
         importlib.reload(module_imp)
     return getattr(importlib.import_module(module, package=None), cls)
+
+def instantiate_from_config(config):
+    if not "target" in config:
+        raise KeyError("Expected key `target` to instantiate.")
+    return get_obj_from_str(config["target"])(**config.get("params", dict()))
+
+class WrappedDataset(torch.utils.data.Dataset):
+    \"\"\"Wraps an arbitrary dataset and returns the samples in a dict.\"\"\"
+    def __init__(self, dataset):
+        self.data = dataset
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx]
 
 class DataModuleFromConfig(pl.LightningDataModule):
     def __init__(self, batch_size, train=None, validation=None, test=None,
