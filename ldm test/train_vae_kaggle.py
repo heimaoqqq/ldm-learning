@@ -51,11 +51,14 @@ except ImportError as e:
     ldm_dir = os.path.join(LATENT_DIFFUSION_PATH, "ldm")
     if os.path.exists(ldm_dir):
         print(f"ldm目录存在，内容:")
-        for root, dirs, files in os.walk(ldm_dir, topdown=True, maxdepth=2):
-            print(f"- {root}")
-            for f in files:
-                if f.endswith(".py"):
-                    print(f"  - {f}")
+        for root, dirs, files in os.walk(ldm_dir):
+            # 限制深度为2级
+            depth = root[len(ldm_dir):].count(os.sep)
+            if depth <= 1:  # 只显示前两级
+                print(f"- {root}")
+                for f in files:
+                    if f.endswith(".py"):
+                        print(f"  - {f}")
     else:
         print(f"ldm目录不存在: {ldm_dir}")
     
