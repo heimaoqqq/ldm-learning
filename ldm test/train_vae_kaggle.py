@@ -7,6 +7,7 @@
 import os
 import sys
 import argparse
+import torch
 from omegaconf import OmegaConf
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -147,5 +148,4 @@ def main():
 
 
 if __name__ == "__main__":
-    import torch
     main() 
