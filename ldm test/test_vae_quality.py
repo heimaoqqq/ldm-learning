@@ -16,42 +16,37 @@ from tqdm import tqdm
 # --- Helper Functions and Classes ---
 
 def check_and_install_dependencies():
-    """检查并安装必要的依赖，并强制使用与Kaggle环境兼容的PyTorch和NumPy版本。"""
+    """检查并安装必要的依赖，并强制使用与Kaggle环境兼容的、版本固定的核心库。"""
     try:
         import torch
         import numpy as np
         import diffusers
-        import torch_fidelity
+        import accelerate
         
-        # 验证版本
+        # 验证所有关键库的版本
         torch_ok = torch.__version__.startswith("2.1.2")
-        # 确保NumPy版本是1.x
-        numpy_ok = int(np.__version__.split('.')[0]) < 2
+        numpy_ok = np.__version__.startswith("1.26.4")
+        diffusers_ok = diffusers.__version__.startswith("0.25.1")
+        accelerate_ok = accelerate.__version__.startswith("0.25.0")
         
-        if torch_ok and numpy_ok:
+        if torch_ok and numpy_ok and diffusers_ok and accelerate_ok:
              print("✅ 所有依赖已安装且版本兼容。")
              return
         else:
-            # 如果版本不对，触发重新安装流程
-            error_msg = []
-            if not torch_ok: error_msg.append(f"PyTorch (当前: {torch.__version__}, 需要: 2.1.2.x)")
-            if not numpy_ok: error_msg.append(f"NumPy (当前: {np.__version__}, 需要: <2.0)")
-            raise ImportError(f"版本不匹配: {', '.join(error_msg)}")
+            # 如果任一版本不对，触发重新安装流程
+            raise ImportError(f"检测到版本不匹配，将执行环境修复。")
 
     except ImportError as e:
         print(f"📦 检测到依赖问题: {e}")
         print("   将开始修复流程...")
         
-        # 定义安装命令
-        # 强制安装 NumPy < 2.0 来解决 ABI 兼容性问题
-        pytorch_install_cmd = "pip install --upgrade --force-reinstall torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu121 -q"
-        other_deps_install_cmd = "pip install diffusers transformers accelerate scikit-image torch-fidelity tqdm numpy==1.26.4 -q"
+        # 定义安装命令，所有核心库都固定版本
+        # 这是为了确保一个稳定且完全兼容的环境
+        install_cmd = "pip install --upgrade torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu121 && " \
+                      "pip install --upgrade diffusers==0.25.1 transformers==4.36.2 accelerate==0.25.0 scikit-image==0.22.0 torch-fidelity==0.3.0 tqdm==4.66.1 numpy==1.26.4"
 
-        print("   第一步: 强制重装与Kaggle CUDA 12.1 兼容的PyTorch版本...")
-        os.system(pytorch_install_cmd)
-        
-        print("   第二步: 安装其他必要的库并固定NumPy版本到1.26.4...")
-        os.system(other_deps_install_cmd)
+        print("   正在执行环境修复，将所有核心库固定到兼容版本... (此过程可能需要几分钟)")
+        os.system(install_cmd)
         
         print("\n" + "="*50)
         print("✅ 依赖修复完成。")
