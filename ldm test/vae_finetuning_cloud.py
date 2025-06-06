@@ -13,6 +13,11 @@ import sys
 import gc
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from PIL import Image
+from diffusers import AutoencoderKL
+from transformers import get_scheduler
 
 # 云环境初始化
 print("🌐 云服务器VAE Fine-tuning环境初始化...")
@@ -288,51 +293,51 @@ def build_cloud_dataloader(root_dir, batch_size=8, num_workers=0, val_split=0.3)
     
     return train_loader, val_loader, len(train_dataset), len(val_dataset)
 
-class CloudVAEFineTuner:
-    """云环境VAE Fine-tuning器"""
-    
-    def __init__(self, data_dir='./data'):
+class VAEFineTuner:
+    """优化的VAE微调器，专为P100 GPU设计"""
+    def __init__(self, data_dir, images_dir, annotations_dir, output_dir='/kaggle/working/vae_finetuned'):
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        print(f"🚀 云VAE Fine-tuning 设备: {self.device}")
+        print(f"🚀 VAE Fine-tuning 设备: {self.device}")
         
-        # 内存优化配置
+        # 针对P100 GPU优化的配置
         self.config = {
-            'batch_size': 12,  # 增大batch size
-            'gradient_accumulation_steps': 2,  # 保持适度的梯度累积
+            'batch_size': 12,
+            'gradient_accumulation_steps': 2,
             'learning_rate': 1e-5,
             'weight_decay': 0.01,
-            'max_epochs': 20,  # 增加训练轮次
+            'max_epochs': 20,
             'data_dir': data_dir,
             'images_dir': images_dir,
             'annotations_dir': annotations_dir,
-            'save_dir': '/kaggle/working/vae_finetuned',
+            'save_dir': output_dir,
             'reconstruction_weight': 1.0,
-            'kl_weight': 1e-5,  # 保持标准KL权重
-            'perceptual_weight': 0.3,  # 启用感知损失
-            'use_perceptual_loss': True,  # 启用感知损失
-            'save_every_epochs': 2,  # 每2个epoch保存一次
-            'eval_every_epochs': 2,  # 每2个epoch评估一次
+            'kl_weight': 1e-7,  # 降低KL权重，更注重重建质量
+            'perceptual_weight': 0.1,  # 降低感知损失权重
+            'use_perceptual_loss': True,
+            'save_every_epochs': 2,
+            'eval_every_epochs': 2,
             'use_gradient_checkpointing': True,
-            'mixed_precision': False if self.device == 'cpu' else MIXED_PRECISION_AVAILABLE,
-            'image_size': 256,  # 使用全尺寸图像
+            'mixed_precision': MIXED_PRECISION_AVAILABLE,
+            'image_size': 256,
         }
         self.best_model_checkpoint_path = None
         
         os.makedirs(self.config['save_dir'], exist_ok=True)
         
-        # 1. 创建数据加载器 - 减少num_workers
-        print("📁 加载Oxford-IIIT Pet数据集...")
+        # 数据加载器
         self.train_loader, self.val_loader, train_size, val_size = build_pet_dataloader(
             root_dir=self.config['data_dir'],
+            images_dir=self.config['images_dir'],
+            annotations_dir=self.config['annotations_dir'],
             batch_size=self.config['batch_size'],
-            num_workers=0,  # 减少workers以节省内存
+            num_workers=2,
             val_split=0.2
         )
-        print(f"   训练集: {len(self.train_loader)} batches ({train_size} samples)")
-        print(f"   验证集: {len(self.val_loader)} batches ({val_size} samples)")
-        print(f"   有效batch size: {self.config['batch_size'] * self.config['gradient_accumulation_steps']}")
         
-        # 2. 加载预训练VAE
+        print(f"  有效batch size: {self.config['batch_size'] * self.config['gradient_accumulation_steps']}")
+        print(f"  图像尺寸: {self.config['image_size']}x{self.config['image_size']}")
+        
+        # 加载VAE
         print("📦 加载预训练AutoencoderKL...")
         self.vae = AutoencoderKL.from_pretrained(
             "runwayml/stable-diffusion-v1-5", 
@@ -340,65 +345,39 @@ class CloudVAEFineTuner:
         ).to(self.device).float()
         
         # 启用梯度检查点
-        if self.config['use_gradient_checkpointing']:
-            if hasattr(self.vae, 'enable_gradient_checkpointing'):
-                self.vae.enable_gradient_checkpointing()
-                print("✅ VAE梯度检查点已启用")
+        if hasattr(self.vae, 'enable_gradient_checkpointing'):
+            self.vae.enable_gradient_checkpointing()
+            print("✅ VAE梯度检查点已启用")
         
-        # 解冻VAE参数用于fine-tuning
+        # 解冻参数
         for param in self.vae.parameters():
             param.requires_grad = True
         
-        print(f"🔓 VAE参数已解冻用于fine-tuning")
-        
-        # 3. 配置优化器
         self.setup_optimizer()
-        
-        # 4. 损失函数
         self.mse_loss = nn.MSELoss()
         self.setup_perceptual_loss()
         
-        # 5. 混合精度训练
         if self.config['mixed_precision']:
-            if GRADSCALER_DEVICE:
-                self.scaler = GradScaler(GRADSCALER_DEVICE)
-            else:
-                self.scaler = GradScaler()
+            self.scaler = GradScaler()
             print("✅ 混合精度训练已启用")
         
-        # 记录训练历史
+        # 训练历史记录
         self.train_history = {
-            'epoch': [],
-            'train_loss': [],
-            'recon_loss': [],
-            'kl_loss': [],
-            'perceptual_loss': [],
-            'val_mse': [],
-            'val_epoch': []
+            'epoch': [], 'train_loss': [], 'recon_loss': [],
+            'kl_loss': [], 'perceptual_loss': [], 'val_mse': [], 'val_epoch': []
         }
         
-        # 清理初始化后的内存
         self.clear_memory()
-        
-        print("✅ 云VAE Fine-tuning器初始化完成!")
+        print("✅ VAE微调器初始化完成!")
     
     def setup_optimizer(self):
-        """设置分层优化器"""
-        # 只fine-tune decoder + encoder的最后几层
-        finetune_params = []
-        
-        # Decoder - 全部fine-tune
-        finetune_params.extend(self.vae.decoder.parameters())
-        
-        # Encoder - 只fine-tune最后2个block
-        encoder_blocks = list(self.vae.encoder.down_blocks)
-        for block in encoder_blocks[-2:]:  # 最后2个block
-            finetune_params.extend(block.parameters())
-        
-        # Post quant conv
-        finetune_params.extend(self.vae.quant_conv.parameters())
-        finetune_params.extend(self.vae.post_quant_conv.parameters())
-        
+        """设置分层优化器，并使用带预热的学习率调度器"""
+        finetune_params = list(self.vae.decoder.parameters()) + \
+                        list(self.vae.encoder.down_blocks[-2].parameters()) + \
+                        list(self.vae.encoder.down_blocks[-1].parameters()) + \
+                        list(self.vae.quant_conv.parameters()) + \
+                        list(self.vae.post_quant_conv.parameters())
+
         total_params = sum(p.numel() for p in finetune_params)
         print(f"🎯 Fine-tune参数数量: {total_params:,}")
         
@@ -408,14 +387,27 @@ class CloudVAEFineTuner:
             weight_decay=self.config['weight_decay']
         )
         
-        # 学习率调度器
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, 
-            T_max=self.config['max_epochs']
+        # 计算总训练步数
+        num_update_steps_per_epoch = len(self.train_loader) // self.config['gradient_accumulation_steps']
+        num_training_steps = self.config['max_epochs'] * num_update_steps_per_epoch
+        # 设置预热步数，总步数的10%
+        num_warmup_steps = int(num_training_steps * 0.1)
+
+        print(f"🔄 优化器设置 - 使用带预热的调度器:")
+        print(f"   总训练步数: {num_training_steps}")
+        print(f"   预热步数: {num_warmup_steps} (占总步数的10%)")
+        print(f"   权重配置: KL损失={self.config['kl_weight']}, 感知损失={self.config['perceptual_weight']}")
+
+        # 使用 transformers 提供的带预热的调度器
+        self.scheduler = get_scheduler(
+            "cosine",
+            optimizer=self.optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
         )
     
     def setup_perceptual_loss(self):
-        """设置完整感知损失"""
+        """设置VGG感知损失"""
         if not self.config['use_perceptual_loss']:
             print("🚫 感知损失已关闭以节省内存")
             self.perceptual_net = None
@@ -427,111 +419,97 @@ class CloudVAEFineTuner:
             for param in self.perceptual_net.parameters():
                 param.requires_grad = False
             self.perceptual_net.eval()
-            print("✅ 完整VGG16感知损失已设置 (FP32)")
+            print("✅ VGG16感知损失已设置 (使用前16层)")
         except:
             print("⚠️  VGG16不可用，跳过感知损失")
             self.perceptual_net = None
-    
+            
     def compute_perceptual_loss(self, real, fake):
-        """计算完整感知损失"""
+        """计算感知损失"""
         if self.perceptual_net is None:
             return torch.tensor(0.0, device=self.device, dtype=torch.float32)
         
-        # Ensure network and inputs are float32
         self.perceptual_net.float()
         real = real.float()
         fake = fake.float()
         
-        # 确保输入是3通道
         if real.size(1) == 1:
             real = real.repeat(1, 3, 1, 1)
         if fake.size(1) == 1:
             fake = fake.repeat(1, 3, 1, 1)
         
-        # 计算VGG特征，完全避免autocast的影响
         with torch.no_grad():
             real_features = self.perceptual_net(real)
         
-        # 确保fake_features计算也使用正确的数据类型
         fake_features = self.perceptual_net(fake)
-        
-        # Ensure MSE损失计算使用相同的数据类型
         return F.mse_loss(real_features.float(), fake_features.float())
     
     def vae_loss(self, images):
-        """VAE损失函数 - VAE操作强制FP32，其余依赖外部autocast"""
-        # images 输入时，在混合精度模式下已在 train_epoch 中被转换为 .float(), 
-        # 并且此函数在顶层 autocast(dtype=torch.float16) 上下文中被调用。
-
+        """VAE损失函数计算"""
         try:
-            # 1. VAE操作：强制在FP32下执行，局部覆盖外部autocast
-            if AUTOCAST_DEVICE: # 新版PyTorch
-                with autocast(AUTOCAST_DEVICE, enabled=False, dtype=torch.float32):
-                    posterior = self.vae.encode(images.float()).latent_dist
-                    latents = posterior.sample().float()
-                    reconstructed = self.vae.decode(latents).sample.float()
-            else: # 传统版本 PyTorch (autocast 指 torch.cuda.amp.autocast)
-                with autocast(enabled=False):
-                    posterior = self.vae.encode(images.float()).latent_dist
-                    latents = posterior.sample().float()
-                    reconstructed = self.vae.decode(latents).sample.float()
-
-            # 2. 重建损失：输入确保是FP32
-            recon_loss = self.mse_loss(reconstructed.float(), images.float()) # images 已是 .float()
+            images = images.float()
+            posterior = self.vae.encode(images).latent_dist
+            latents = posterior.sample().float()
+            reconstructed = self.vae.decode(latents).sample.float()
             
-            # 3. KL散度损失：结果转换为FP32
-            kl_loss = posterior.kl().mean().float()
+            # 重建损失
+            recon_loss = self.mse_loss(reconstructed, images)
             
-            # 4. 感知损失：输入确保是FP32。compute_perceptual_loss内部已处理好网络精度。
+            # KL散度损失
+            try:
+                kl_raw = posterior.kl()
+                if torch.isnan(kl_raw).any() or torch.isinf(kl_raw).any():
+                    print("⚠️ 检测到KL散度中的NaN/Inf值，使用替代计算方法")
+                    mean, var = posterior.mean, posterior.var
+                    eps = 1e-8
+                    kl_loss = 0.5 * torch.mean(mean.pow(2) + var - torch.log(var + eps) - 1)
+                else:
+                    kl_loss = kl_raw.mean()
+                if torch.isnan(kl_loss) or torch.isinf(kl_loss):
+                    print("⚠️ KL损失仍然包含NaN/Inf，使用常数替代")
+                    kl_loss = torch.tensor(0.1, device=self.device, dtype=torch.float32)
+            except Exception as kl_e:
+                print(f"⚠️ KL散度计算错误: {kl_e}，使用替代值")
+                kl_loss = torch.tensor(0.1, device=self.device, dtype=torch.float32)
+            
+            # 感知损失
             if self.perceptual_net:
-                perceptual_loss = self.compute_perceptual_loss(images.float(), reconstructed.float())
+                perceptual_loss = self.compute_perceptual_loss(images, reconstructed)
             else:
                 perceptual_loss = torch.tensor(0.0, device=self.device, dtype=torch.float32)
             
-            # 5. 总损失：所有组件都应是FP32
+            # 总损失
             total_loss = (
                 self.config['reconstruction_weight'] * recon_loss +
                 self.config['kl_weight'] * kl_loss +
                 self.config['perceptual_weight'] * perceptual_loss
             )
             
-            # 6. 返回值：确保所有返回的张量是FP32
+            if torch.isnan(total_loss) or torch.isinf(total_loss):
+                print("⚠️ 总损失包含NaN/Inf，仅使用重建损失")
+                total_loss = self.config['reconstruction_weight'] * recon_loss
+                
             return {
-                'total_loss': total_loss.float(),
-                'recon_loss': recon_loss.float(),
-                'kl_loss': kl_loss.float(),
-                'perceptual_loss': perceptual_loss.float(),
-                'reconstructed': reconstructed.float(),
-                'latents': latents.float()
+                'total_loss': total_loss,
+                'recon_loss': recon_loss,
+                'kl_loss': kl_loss,
+                'perceptual_loss': perceptual_loss,
+                'reconstructed': reconstructed,
+                'latents': latents
             }
-            
         except Exception as e:
-            error_str = str(e).lower()
-            if "dtype" in error_str or "type" in error_str or "expected scalar type" in error_str:
-                print(f"⚠️ VAE损失计算中的数据类型错误: {e}")
-                return {
-                    'total_loss': torch.tensor(0.0, device=self.device, dtype=torch.float32, requires_grad=True),
-                    'recon_loss': torch.tensor(0.0, device=self.device, dtype=torch.float32),
-                    'kl_loss': torch.tensor(0.0, device=self.device, dtype=torch.float32),
-                    'perceptual_loss': torch.tensor(0.0, device=self.device, dtype=torch.float32),
-                    'reconstructed': images.float(),
-                    'latents': torch.zeros_like(images, dtype=torch.float32)
-                }
-            else:
-                print(f"🔥 VAE_LOSS内部发生意外错误，类型: {type(e)}, 内容: {e} 🔥")
-                import traceback
-                traceback.print_exc()
-                raise e
+            print(f"🔥 VAE_LOSS内部发生错误，类型: {type(e)}, 内容: {e} 🔥")
+            import traceback
+            traceback.print_exc()
+            raise e
     
     def clear_memory(self):
-        """增强内存清理"""
+        """清理内存"""
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-        gc.collect()
     
     def train_epoch(self, epoch: int):
-        """内存优化的训练epoch"""
+        """优化的训练epoch (使用更好的学习率调度策略)"""
         self.vae.train()
         
         total_loss = 0
@@ -540,49 +518,42 @@ class CloudVAEFineTuner:
         total_perceptual = 0
         num_batches = 0
         
-        # 重置梯度累积
         self.optimizer.zero_grad()
         
         pbar = tqdm(self.train_loader, desc=f"Fine-tune Epoch {epoch+1}")
         
         for batch_idx, batch in enumerate(pbar):
-            images, _ = batch  # 忽略标签
+            images, _ = batch
             images = images.to(self.device, non_blocking=True)
             
-            # 混合精度训练
             if self.config['mixed_precision']:
                 if AUTOCAST_DEVICE:
                     with autocast(AUTOCAST_DEVICE, dtype=torch.float16):
                         loss_dict = self.vae_loss(images)
                         loss = loss_dict['total_loss'] / self.config['gradient_accumulation_steps']
                 else:
-                    with autocast(): # Old API for mixed precision context
+                    with autocast():
                         loss_dict = self.vae_loss(images)
                         loss = loss_dict['total_loss'] / self.config['gradient_accumulation_steps']
                 
-                # 确保损失是 float32 类型再进行缩放和反向传播
                 self.scaler.scale(loss.float()).backward()
             else:
-                # 前向传播 (无混合精度)
                 loss_dict = self.vae_loss(images)
                 loss = loss_dict['total_loss'] / self.config['gradient_accumulation_steps']
-                loss.backward() # 直接反向传播
+                loss.backward()
             
-            # 梯度累积
             if (batch_idx + 1) % self.config['gradient_accumulation_steps'] == 0:
                 try:
                     if self.config['mixed_precision']:
-                        # 梯度裁剪
                         self.scaler.unscale_(self.optimizer)
                         torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
-                        
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
                     else:
-                        # 梯度裁剪
                         torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
                         self.optimizer.step()
                     
+                    self.scheduler.step() # 每步更新学习率调度器
                     self.optimizer.zero_grad()
                     
                 except RuntimeError as grad_e:
@@ -593,7 +564,6 @@ class CloudVAEFineTuner:
                     else:
                         raise grad_e
             
-            # 记录损失（恢复到原始scale）
             actual_loss = loss.item() * self.config['gradient_accumulation_steps']
             total_loss += actual_loss
             total_recon += loss_dict['recon_loss'].item()
@@ -601,7 +571,6 @@ class CloudVAEFineTuner:
             total_perceptual += loss_dict['perceptual_loss'].item()
             num_batches += 1
             
-            # 更新进度条
             pbar.set_postfix({
                 'Loss': f'{actual_loss:.4f}',
                 'Recon': f'{loss_dict["recon_loss"].item():.4f}',
@@ -609,18 +578,15 @@ class CloudVAEFineTuner:
                 'Perc': f'{loss_dict["perceptual_loss"].item():.4f}'
             })
             
-            # 保存第一个batch的重建样本
             if batch_idx == 0:
                 self.save_reconstruction_samples(
                     images, loss_dict['reconstructed'], epoch
                 )
             
-            # 更频繁的内存清理
-            if batch_idx % 20 == 0:  # 每20个batch清理一次
+            if batch_idx % 20 == 0:
                 del images, loss_dict, loss
                 self.clear_memory()
         
-        # 处理最后不完整的梯度累积
         if (len(self.train_loader)) % self.config['gradient_accumulation_steps'] != 0:
             if self.config['mixed_precision']:
                 self.scaler.unscale_(self.optimizer)
@@ -630,10 +596,9 @@ class CloudVAEFineTuner:
             else:
                 torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
                 self.optimizer.step()
+            
+            self.scheduler.step() # 确保最后一次更新学习率
             self.optimizer.zero_grad()
-        
-        # 更新学习率
-        self.scheduler.step()
         
         avg_metrics = {
             'avg_loss': total_loss / num_batches,
@@ -646,171 +611,133 @@ class CloudVAEFineTuner:
         return avg_metrics
     
     def save_reconstruction_samples(self, original, reconstructed, epoch):
-        """保存重建样本对比"""
-        with torch.no_grad():
-            # 反归一化
+        """保存重建样本"""
+        try:
             def denormalize(tensor):
-                return torch.clamp((tensor + 1) / 2, 0, 1)
+                tensor = tensor.clone().detach().cpu()
+                tensor = tensor * 0.5 + 0.5  # 反归一化
+                tensor = tensor.clamp(0, 1)
+                return tensor
             
-            orig = denormalize(original[:8]).cpu()
-            recon = denormalize(reconstructed[:8]).cpu()
-            
-            fig, axes = plt.subplots(2, 8, figsize=(24, 6))
-            
-            for i in range(8):
-                # 原图
-                axes[0, i].imshow(orig[i].permute(1, 2, 0))
-                axes[0, i].set_title(f'Original {i+1}')
-                axes[0, i].axis('off')
+            with torch.no_grad():
+                # 选择最多8张图像用于可视化
+                num_images = min(8, original.size(0))
+                original = denormalize(original[:num_images])
+                reconstructed = denormalize(reconstructed[:num_images])
                 
-                # 重建图
-                axes[1, i].imshow(recon[i].permute(1, 2, 0))
-                axes[1, i].set_title(f'Reconstructed {i+1}')
-                axes[1, i].axis('off')
-            
-            plt.suptitle(f'VAE Reconstruction - Epoch {epoch+1}')
-            plt.tight_layout()
-            plt.savefig(f'{self.config["save_dir"]}/reconstruction_epoch_{epoch+1}.png',
-                       dpi=150, bbox_inches='tight')
-            plt.close()
+                # 创建网格
+                grid = torch.zeros((3, original.size(2) * 2, original.size(3) * num_images))
+                for i in range(num_images):
+                    grid[:, :original.size(2), i*original.size(3):(i+1)*original.size(3)] = original[i]
+                    grid[:, original.size(2):, i*original.size(3):(i+1)*original.size(3)] = reconstructed[i]
+                
+                # 保存图像
+                from torchvision.utils import save_image
+                save_image(grid, f"{self.config['save_dir']}/recon_epoch_{epoch+1}.png")
+                print(f"✅ 保存了重建样本 epoch {epoch+1}")
+        except Exception as e:
+            print(f"⚠️ 保存重建样本失败: {e}")
     
     @torch.no_grad()
     def evaluate_reconstruction_quality(self, val_loader):
-        """内存优化的评估函数"""
+        """评估重建质量"""
         self.vae.eval()
-        
         total_mse = 0
         total_samples = 0
-        latent_stats = []
+        latent_means = []
+        latent_stds = []
         
-        # 限制评估样本数量
-        max_eval_batches = min(20, len(val_loader))
-        
-        for batch_idx, batch in enumerate(val_loader):
-            if batch_idx >= max_eval_batches:
-                break
-                
+        for batch in tqdm(val_loader, desc="评估重建质量"):
             images, _ = batch
-            images = images.to(self.device, non_blocking=True)
+            images = images.to(self.device)
             
-            # VAE重建
-            if self.config['mixed_precision']:
-                if AUTOCAST_DEVICE:
-                    # 新版PyTorch
-                    with autocast(AUTOCAST_DEVICE, dtype=torch.float16):
-                        posterior = self.vae.encode(images).latent_dist
-                        latents = posterior.sample()
-                        reconstructed = self.vae.decode(latents).sample
-                else:
-                    # 传统版本
-                    with autocast():
-                        posterior = self.vae.encode(images).latent_dist
-                        latents = posterior.sample()
-                        reconstructed = self.vae.decode(latents).sample
-            else:
+            try:
                 posterior = self.vae.encode(images).latent_dist
                 latents = posterior.sample()
-                reconstructed = self.vae.decode(latents).sample
-            
-            # 计算MSE
-            mse = F.mse_loss(reconstructed, images, reduction='sum')
-            total_mse += mse.item()
-            total_samples += images.size(0)
-            
-            # 收集潜在表示统计
-            latent_stats.append({
-                'mean': latents.mean().item(),
-                'std': latents.std().item(),
-                'min': latents.min().item(),
-                'max': latents.max().item()
-            })
-            
-            # 清理内存
-            del images, posterior, latents, reconstructed, mse
-            
-            if batch_idx % 5 == 0:
+                reconstructions = self.vae.decode(latents).sample
+                
+                # 计算MSE
+                mse = F.mse_loss(reconstructions, images, reduction='none').mean([1, 2, 3])
+                total_mse += mse.sum().item()
+                total_samples += images.size(0)
+                
+                # 收集潜在空间统计信息
+                latent_means.append(posterior.mean.cpu().flatten(1).mean(0).numpy())
+                latent_stds.append(posterior.var.sqrt().cpu().flatten(1).mean(0).numpy())
+                
+            except RuntimeError as e:
+                print(f"⚠️ 评估中的CUDA错误: {e}")
                 self.clear_memory()
         
-        avg_mse = total_mse / total_samples
+        avg_mse = total_mse / total_samples if total_samples > 0 else float('inf')
         
-        # 计算平均潜在空间统计
-        avg_latent_stats = {
-            'mean': np.mean([s['mean'] for s in latent_stats]),
-            'std': np.mean([s['std'] for s in latent_stats]),
-            'min': np.min([s['min'] for s in latent_stats]),
-            'max': np.max([s['max'] for s in latent_stats])
+        # 汇总潜在空间统计信息
+        latent_stats = {
+            'mean': np.mean(latent_means, axis=0) if latent_means else None,
+            'std': np.mean(latent_stds, axis=0) if latent_stds else None
         }
         
-        print(f"📊 重建质量MSE: {avg_mse:.6f}")
-        print(f"🧠 潜在空间统计: 均值={avg_latent_stats['mean']:.4f}, "
-              f"标准差={avg_latent_stats['std']:.4f}, "
-              f"范围=[{avg_latent_stats['min']:.2f}, {avg_latent_stats['max']:.2f}]")
+        print(f"📊 验证集平均MSE: {avg_mse:.6f}")
+        self.clear_memory()
         
-        return avg_mse, avg_latent_stats
+        return avg_mse, latent_stats
     
     def save_finetuned_vae(self, epoch, metrics):
-        """保存fine-tuned VAE"""
-        save_path = f'{self.config["save_dir"]}/vae_finetuned_epoch_{epoch+1}.pth'
-        
-        torch.save({
-            'vae_state_dict': self.vae.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
-            'epoch': epoch,
-            'metrics': metrics,
-            'config': self.config,
-            'train_history': self.train_history
-        }, save_path)
-        
-        print(f"💾 Fine-tuned VAE保存: {save_path}")
+        """保存微调后的VAE模型"""
+        try:
+            model_path = f"{self.config['save_dir']}/vae_finetuned_epoch_{epoch+1}.pth"
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': self.vae.state_dict(),
+                'metrics': metrics,
+                'config': self.config
+            }, model_path)
+            print(f"💾 保存模型到 {model_path}")
+        except Exception as e:
+            print(f"❌ 保存模型失败: {e}")
     
     def plot_training_history(self):
         """绘制训练历史"""
-        if len(self.train_history['epoch']) == 0:
-            return
+        plt.figure(figsize=(14, 10))
+        axes = plt.subplot(2, 2, 1)
+        plt.plot(self.train_history['epoch'], self.train_history['train_loss'])
+        plt.title('总损失')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.grid(True)
         
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        plt.subplot(2, 2, 2)
+        plt.plot(self.train_history['epoch'], self.train_history['kl_loss'])
+        plt.title('KL散度损失')
+        plt.xlabel('Epoch')
+        plt.ylabel('KL Loss')
+        plt.grid(True)
         
-        # 总损失
-        axes[0, 0].plot(self.train_history['epoch'], self.train_history['train_loss'])
-        axes[0, 0].set_title('Training Loss')
-        axes[0, 0].set_xlabel('Epoch')
-        axes[0, 0].set_ylabel('Loss')
-        axes[0, 0].grid(True)
+        plt.subplot(2, 2, 3)
+        plt.plot(self.train_history['epoch'], self.train_history['perceptual_loss'])
+        plt.title('感知损失')
+        plt.xlabel('Epoch')
+        plt.ylabel('Perceptual Loss')
+        plt.grid(True)
         
-        # 重建损失
-        axes[0, 1].plot(self.train_history['epoch'], self.train_history['recon_loss'])
-        axes[0, 1].set_title('Reconstruction Loss')
-        axes[0, 1].set_xlabel('Epoch')
-        axes[0, 1].set_ylabel('MSE Loss')
-        axes[0, 1].grid(True)
-        
-        # KL损失
-        axes[1, 0].plot(self.train_history['epoch'], self.train_history['kl_loss'])
-        axes[1, 0].set_title('KL Divergence Loss')
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_ylabel('KL Loss')
-        axes[1, 0].grid(True)
-        
-        # 验证MSE
-        if self.train_history['val_mse']:
-            axes[1, 1].plot(self.train_history['val_epoch'], 
-                           self.train_history['val_mse'])
-            axes[1, 1].set_title('Validation MSE')
-            axes[1, 1].set_xlabel('Epoch')
-            axes[1, 1].set_ylabel('MSE')
-            axes[1, 1].grid(True)
+        plt.subplot(2, 2, 4)
+        if self.train_history['val_epoch']:
+            plt.plot(self.train_history['val_epoch'], self.train_history['val_mse'])
+            plt.title('验证集MSE')
+            plt.xlabel('Epoch')
+            plt.ylabel('MSE')
+            plt.grid(True)
         
         plt.tight_layout()
         plt.savefig(f'{self.config["save_dir"]}/training_history.png', dpi=150, bbox_inches='tight')
         plt.close()
     
     def finetune(self):
-        """主要fine-tuning流程"""
-        print("🚀 开始云VAE Fine-tuning完整训练...")
+        """优化版本的fine-tuning流程，添加更好的学习率调度策略"""
+        print("🚀 开始优化版VAE Fine-tuning训练...")
         print("=" * 60)
         
-        if torch.cuda.is_available(): # 确保只在CUDA可用时设置
+        if torch.cuda.is_available():
             torch.autograd.set_detect_anomaly(True)
             print("⚠️ PyTorch 异常检测已启用 (用于调试，可能影响速度)")
         
@@ -819,27 +746,33 @@ class CloudVAEFineTuner:
         for epoch in range(self.config['max_epochs']):
             print(f"\n📅 Epoch {epoch+1}/{self.config['max_epochs']}")
             
+            # 调用新的train_epoch方法
             train_metrics = self.train_epoch(epoch)
             
+            # 记录训练历史
             self.train_history['epoch'].append(epoch + 1)
             self.train_history['train_loss'].append(train_metrics['avg_loss'])
             self.train_history['recon_loss'].append(train_metrics['avg_recon'])
             self.train_history['kl_loss'].append(train_metrics['avg_kl'])
             self.train_history['perceptual_loss'].append(train_metrics['avg_perceptual'])
             
+            # 进行验证
             if epoch % self.config['eval_every_epochs'] == 0 or epoch == self.config['max_epochs'] - 1:
                 val_mse, latent_stats = self.evaluate_reconstruction_quality(self.val_loader)
                 self.train_history['val_mse'].append(val_mse)
                 self.train_history['val_epoch'].append(epoch + 1)
+            
+            # 学习率是每步更新的，这里获取最新的学习率值
+            current_lr = self.optimizer.param_groups[0]['lr']
             
             print(f"📊 Epoch {epoch+1} 结果:")
             print(f"   总损失: {train_metrics['avg_loss']:.4f}")
             print(f"   重建损失: {train_metrics['avg_recon']:.4f}")
             print(f"   KL损失: {train_metrics['avg_kl']:.4f}")
             print(f"   感知损失: {train_metrics['avg_perceptual']:.4f}")
-            print(f"   学习率: {self.scheduler.get_last_lr()[0]:.2e}")
+            print(f"   当前学习率: {current_lr:.2e}")
             
-            # 保存最佳模型逻辑修改
+            # 保存最佳模型逻辑
             current_epoch_model_path = f'{self.config["save_dir"]}/vae_finetuned_epoch_{epoch+1}.pth'
             is_best_model_save = False
             if train_metrics['avg_recon'] < best_recon_loss:
@@ -847,11 +780,10 @@ class CloudVAEFineTuner:
                 
                 # 尝试删除上一个被标记为"最佳"的模型文件
                 if self.best_model_checkpoint_path and os.path.exists(self.best_model_checkpoint_path):
-                    # 检查这个旧的最佳模型是否也是一个定期保存点
                     try:
                         # 从文件名提取旧的epoch号
                         old_epoch_str = self.best_model_checkpoint_path.split('_epoch_')[-1].split('.pth')[0]
-                        old_epoch_idx = int(old_epoch_str) - 1 # epoch号转为0-indexed
+                        old_epoch_idx = int(old_epoch_str) - 1  # epoch号转为0-indexed
                         is_periodic_save = (old_epoch_idx % self.config['save_every_epochs'] == 0)
                         
                         if not is_periodic_save:
@@ -862,13 +794,13 @@ class CloudVAEFineTuner:
                     except Exception as e_remove:
                         print(f"⚠️ 无法删除或检查旧的最佳模型: {e_remove}")
 
-                self.save_finetuned_vae(epoch, train_metrics) # 保存当前模型
-                self.best_model_checkpoint_path = current_epoch_model_path # 更新最佳模型路径
+                self.save_finetuned_vae(epoch, train_metrics)  # 保存当前模型
+                self.best_model_checkpoint_path = current_epoch_model_path  # 更新最佳模型路径
                 print(f"✅ 保存新的最佳模型 (重建损失: {best_recon_loss:.4f}): {current_epoch_model_path}")
                 is_best_model_save = True
             
             if epoch % self.config['save_every_epochs'] == 0:
-                if not is_best_model_save: # 如果此epoch已作为最佳模型保存，则不再重复保存
+                if not is_best_model_save:  # 如果此epoch已作为最佳模型保存，则不再重复保存
                     self.save_finetuned_vae(epoch, train_metrics)
                 self.plot_training_history()
             
@@ -877,7 +809,7 @@ class CloudVAEFineTuner:
         
         # 训练完成
         print("\n" + "=" * 60)
-        print("🎉 云VAE Fine-tuning 完整训练完成!")
+        print("🎉 优化版VAE Fine-tuning训练完成!")
         print(f"🏆 最佳重建损失: {best_recon_loss:.4f}")
         
         # 最终评估
@@ -889,510 +821,45 @@ class CloudVAEFineTuner:
         
         return best_recon_loss
 
-def create_emergency_low_memory_finetuner(data_dir):
-    """创建极低内存配置的Fine-tuner"""
-    print("🆘 启动应急低内存模式...")
-    
-    class EmergencyCloudVAEFineTuner(CloudVAEFineTuner):
-        def __init__(self, data_dir):
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            print(f"🚀 应急模式 - 云VAE Fine-tuning 设备: {self.device}")
-            
-            # 极端内存优化配置
-            self.config = {
-                'batch_size': 4,  # 极小batch size
-                'gradient_accumulation_steps': 4,  # 增加梯度累积
-                'learning_rate': 1e-5,
-                'weight_decay': 0.01,
-                'max_epochs': 15,  # 减少训练轮次
-                'data_dir': data_dir,
-                'save_dir': './vae_finetuned',
-                'reconstruction_weight': 1.0,
-                'kl_weight': 0.05,  # 进一步降低KL权重
-                'perceptual_weight': 0.1,  # 保持轻量感知损失
-                'use_perceptual_loss': True,  # 保持感知损失开启
-                'save_every_epochs': 10,
-                'eval_every_epochs': 5,
-                'use_gradient_checkpointing': True,
-                'mixed_precision': False if self.device == 'cpu' else MIXED_PRECISION_AVAILABLE,
-                'image_size': 128,  # 降低图像尺寸
-            }
-            self.best_model_checkpoint_path = None
-            
-            os.makedirs(self.config['save_dir'], exist_ok=True)
-            
-            # 数据加载器
-            print("📁 加载应急模式数据集...")
-            self.train_loader, self.val_loader, train_size, val_size = build_cloud_dataloader(
-                root_dir=self.config['data_dir'],
-                batch_size=self.config['batch_size'],
-                num_workers=0,
-                val_split=0.3
-            )
-            print(f"   应急模式batch size: {self.config['batch_size']}")
-            print(f"   有效batch size: {self.config['batch_size'] * self.config['gradient_accumulation_steps']}")
-            
-            # 加载VAE
-            print("📦 加载预训练AutoencoderKL (应急模式)...")
-            self.vae = AutoencoderKL.from_pretrained(
-                "runwayml/stable-diffusion-v1-5", 
-                subfolder="vae"
-            ).to(self.device).float()
-            
-            # 启用梯度检查点
-            if hasattr(self.vae, 'enable_gradient_checkpointing'):
-                self.vae.enable_gradient_checkpointing()
-                print("✅ VAE梯度检查点已启用")
-            
-            for param in self.vae.parameters():
-                param.requires_grad = True
-            
-            self.setup_optimizer()
-            self.mse_loss = nn.MSELoss()
-            self.setup_perceptual_loss()  # 会被配置跳过
-            
-            if self.config['mixed_precision']:
-                self.scaler = GradScaler()
-                print("✅ 混合精度训练已启用")
-            
-            self.train_history = {
-                'epoch': [], 'train_loss': [], 'recon_loss': [],
-                'kl_loss': [], 'perceptual_loss': [], 'val_mse': [], 'val_epoch': []
-            }
-            
-            self.clear_memory()
-            print("✅ 应急模式Fine-tuning器初始化完成!")
-        
-        def setup_perceptual_loss(self):
-            """应急模式轻量级感知损失"""
-            try:
-                from torchvision.models import vgg16, VGG16_Weights
-                # 应急模式使用更少的VGG层
-                self.perceptual_net = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features[:8].to(self.device)
-                for param in self.perceptual_net.parameters():
-                    param.requires_grad = False
-                self.perceptual_net.eval()
-                print("✅ 应急模式轻量级VGG感知损失已设置")
-            except:
-                print("⚠️  VGG16不可用，应急模式跳过感知损失")
-                self.perceptual_net = None
-    
-    return EmergencyCloudVAEFineTuner(data_dir)
-
-print("DEBUG PY: Reached point 2 - Before Kaggle main() definition.")
-
-def create_kaggle_trainer(data_dir, images_dir, annotations_dir):
-    """创建适用于Kaggle P100 GPU的高性能训练器"""
-    print("🚀 配置Kaggle P100 GPU训练器...")
-    
-    class KaggleOxfordPetDataset(Dataset):
-        """适配Kaggle路径的Oxford-IIIT Pet数据集类"""
-        
-        def __init__(self, images_dir, annotation_file, transform=None):
-            self.images_dir = images_dir
-            self.transform = transform
-            
-            self.samples = []
-            with open(annotation_file, 'r') as f:
-                for line in f:
-                    if line.startswith('#'):
-                        continue
-                    parts = line.strip().split()
-                    if len(parts) >= 2:
-                        image_id = parts[0]
-                        class_id = int(parts[1]) - 1
-                        self.samples.append((image_id, class_id))
-            print(f"加载了 {len(self.samples)} 个样本")
-        
-        def __len__(self):
-            return len(self.samples)
-        
-        def __getitem__(self, idx):
-            image_id, class_id = self.samples[idx]
-            img_path = os.path.join(self.images_dir, f"{image_id}.jpg")
-            if not os.path.exists(img_path):
-                for ext in ['.jpeg', '.png', '.JPEG', '.PNG']:
-                    alt_path = os.path.join(self.images_dir, f"{image_id}{ext}")
-                    if os.path.exists(alt_path):
-                        img_path = alt_path
-                        break
-            try:
-                image = Image.open(img_path).convert('RGB')
-                if self.transform:
-                    image = self.transform(image)
-                return image, class_id
-            except Exception as e:
-                print(f"错误加载图像 {img_path}: {e}")
-                placeholder = torch.zeros((3, 256, 256))
-                return placeholder, class_id
-    
-    class KaggleVAEFineTuner(CloudVAEFineTuner):
-        def __init__(self, data_dir, images_dir, annotations_dir):
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            print(f"🚀 Kaggle P100 - VAE Fine-tuning 设备: {self.device}")
-            self.config = {
-                'batch_size': 12,
-                'gradient_accumulation_steps': 2,
-                'learning_rate': 1e-5,
-                'weight_decay': 0.01,
-                'max_epochs': 20,
-                'data_dir': data_dir,
-                'images_dir': images_dir,
-                'annotations_dir': annotations_dir,
-                'save_dir': '/kaggle/working/vae_finetuned',
-                'reconstruction_weight': 1.0,
-                'kl_weight': 1e-7,
-                'perceptual_weight': 0.1,
-                'use_perceptual_loss': True,
-                'save_every_epochs': 2,
-                'eval_every_epochs': 2,
-                'use_gradient_checkpointing': True,
-                'mixed_precision': MIXED_PRECISION_AVAILABLE,
-                'image_size': 256,
-            }
-            self.best_model_checkpoint_path = None
-            os.makedirs(self.config['save_dir'], exist_ok=True)
-            transform = transforms.Compose([
-                transforms.Resize((self.config['image_size'], self.config['image_size'])),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-            ])
-            # 更新日志并确保使用 list.txt
-            print("📁 加载Kaggle路径的Oxford-IIIT Pet数据集 (使用 list.txt 获取所有样本)...")
-            annotation_file_to_load = os.path.join(annotations_dir, "list.txt") 
-            
-            train_val_dataset = KaggleOxfordPetDataset(
-                images_dir=images_dir,
-                annotation_file=annotation_file_to_load, 
-                transform=transform
-            )
-            train_size = int(len(train_val_dataset) * 0.8)
-            val_size = len(train_val_dataset) - train_size
-            train_dataset, val_dataset = torch.utils.data.random_split(
-                train_val_dataset, [train_size, val_size], 
-                generator=torch.Generator().manual_seed(42)
-            )
-            self.train_loader = DataLoader(
-                train_dataset, 
-                batch_size=self.config['batch_size'], 
-                shuffle=True, 
-                num_workers=2,
-                pin_memory=True,
-                drop_last=True
-            )
-            self.val_loader = DataLoader(
-                val_dataset, 
-                batch_size=self.config['batch_size'], 
-                shuffle=False, 
-                num_workers=2,
-                pin_memory=True
-            )
-            print(f"  训练集: {len(train_dataset)} 张图片")
-            print(f"  验证集: {len(val_dataset)} 张图片")
-            print(f"  图像尺寸: {self.config['image_size']}x{self.config['image_size']}")
-            print(f"  有效batch size: {self.config['batch_size'] * self.config['gradient_accumulation_steps']}")
-            print(f"📦 加载预训练AutoencoderKL...")
-            self.vae = AutoencoderKL.from_pretrained(
-                "runwayml/stable-diffusion-v1-5", 
-                subfolder="vae"
-            ).to(self.device).float()
-            if hasattr(self.vae, 'enable_gradient_checkpointing'):
-                self.vae.enable_gradient_checkpointing()
-                print("✅ VAE梯度检查点已启用")
-            for param in self.vae.parameters():
-                param.requires_grad = True
-            self.setup_optimizer()
-            self.mse_loss = nn.MSELoss()
-            self.setup_perceptual_loss()
-            if self.config['mixed_precision']:
-                self.scaler = GradScaler()
-                print("✅ 混合精度训练已启用")
-            self.train_history = {
-                'epoch': [], 'train_loss': [], 'recon_loss': [],
-                'kl_loss': [], 'perceptual_loss': [], 'val_mse': [], 'val_epoch': []
-            }
-            self.clear_memory()
-            print("✅ Kaggle P100训练器初始化完成!")
-            
-        def setup_optimizer(self):
-            """设置分层优化器，并使用带预热的学习率调度器"""
-            finetune_params = list(self.vae.decoder.parameters()) + \
-                            list(self.vae.encoder.down_blocks[-2].parameters()) + \
-                            list(self.vae.encoder.down_blocks[-1].parameters()) + \
-                            list(self.vae.quant_conv.parameters()) + \
-                            list(self.vae.post_quant_conv.parameters())
-
-            total_params = sum(p.numel() for p in finetune_params)
-            print(f"🎯 Fine-tune参数数量: {total_params:,}")
-            
-            self.optimizer = torch.optim.AdamW(
-                finetune_params,
-                lr=self.config['learning_rate'],
-                weight_decay=self.config['weight_decay']
-            )
-            
-            # 计算总训练步数
-            num_update_steps_per_epoch = len(self.train_loader) // self.config['gradient_accumulation_steps']
-            num_training_steps = self.config['max_epochs'] * num_update_steps_per_epoch
-            # 设置预热步数，例如总步数的10%
-            num_warmup_steps = int(num_training_steps * 0.1)
-
-            print(f"Scheduler: {num_training_steps} total steps, {num_warmup_steps} warmup steps.")
-
-            # 使用 transformers 提供的带预热的调度器
-            self.scheduler = get_scheduler(
-                "cosine",
-                optimizer=self.optimizer,
-                num_warmup_steps=num_warmup_steps,
-                num_training_steps=num_training_steps,
-            )
-
-        def train_epoch(self, epoch: int):
-            """内存优化的训练epoch (适配步进式学习率调度器)"""
-            self.vae.train()
-            
-            total_loss = 0
-            total_recon = 0
-            total_kl = 0
-            total_perceptual = 0
-            num_batches = 0
-            
-            self.optimizer.zero_grad()
-            
-            pbar = tqdm(self.train_loader, desc=f"Fine-tune Epoch {epoch+1}")
-            
-            for batch_idx, batch in enumerate(pbar):
-                images, _ = batch
-                images = images.to(self.device, non_blocking=True)
-                
-                if self.config['mixed_precision']:
-                    if AUTOCAST_DEVICE:
-                        with autocast(AUTOCAST_DEVICE, dtype=torch.float16):
-                            loss_dict = self.vae_loss(images)
-                            loss = loss_dict['total_loss'] / self.config['gradient_accumulation_steps']
-                    else:
-                        with autocast():
-                            loss_dict = self.vae_loss(images)
-                            loss = loss_dict['total_loss'] / self.config['gradient_accumulation_steps']
-                    
-                    self.scaler.scale(loss.float()).backward()
-                else:
-                    loss_dict = self.vae_loss(images)
-                    loss = loss_dict['total_loss'] / self.config['gradient_accumulation_steps']
-                    loss.backward()
-                
-                if (batch_idx + 1) % self.config['gradient_accumulation_steps'] == 0:
-                    try:
-                        if self.config['mixed_precision']:
-                            self.scaler.unscale_(self.optimizer)
-                            torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
-                            self.scaler.step(self.optimizer)
-                            self.scaler.update()
-                        else:
-                            torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
-                            self.optimizer.step()
-                        
-                        self.scheduler.step() # 更新学习率
-                        self.optimizer.zero_grad()
-                        
-                    except RuntimeError as grad_e:
-                        if "dtype" in str(grad_e).lower() or "type" in str(grad_e).lower():
-                            print(f"⚠️ 梯度步骤数据类型错误，跳过此步骤: {grad_e}")
-                            self.optimizer.zero_grad()
-                            continue
-                        else:
-                            raise grad_e
-                
-                actual_loss = loss.item() * self.config['gradient_accumulation_steps']
-                total_loss += actual_loss
-                total_recon += loss_dict['recon_loss'].item()
-                total_kl += loss_dict['kl_loss'].item()
-                total_perceptual += loss_dict['perceptual_loss'].item()
-                num_batches += 1
-                
-                pbar.set_postfix({
-                    'Loss': f'{actual_loss:.4f}',
-                    'Recon': f'{loss_dict["recon_loss"].item():.4f}',
-                    'KL': f'{loss_dict["kl_loss"].item():.4f}',
-                    'Perc': f'{loss_dict["perceptual_loss"].item():.4f}'
-                })
-                
-                if batch_idx == 0:
-                    self.save_reconstruction_samples(
-                        images, loss_dict['reconstructed'], epoch
-                    )
-                
-                if batch_idx % 20 == 0:
-                    del images, loss_dict, loss
-                    self.clear_memory()
-            
-            if (len(self.train_loader)) % self.config['gradient_accumulation_steps'] != 0:
-                if self.config['mixed_precision']:
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
-                    self.optimizer.step()
-                
-                self.scheduler.step() # 更新学习率
-                self.optimizer.zero_grad()
-            
-            avg_metrics = {
-                'avg_loss': total_loss / num_batches,
-                'avg_recon': total_recon / num_batches,
-                'avg_kl': total_kl / num_batches,
-                'avg_perceptual': total_perceptual / num_batches
-            }
-            
-            self.clear_memory()
-            return avg_metrics
-
-        def setup_perceptual_loss(self):
-            if not self.config['use_perceptual_loss']:
-                print("🚫 感知损失已禁用")
-                self.perceptual_net = None
-                return
-            try:
-                from torchvision.models import vgg16, VGG16_Weights
-                self.perceptual_net = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features[:16].to(self.device).float()
-                for param in self.perceptual_net.parameters():
-                    param.requires_grad = False
-                self.perceptual_net.eval()
-                print("✅ VGG16感知损失已设置 (FP32)")
-            except:
-                print("⚠️ VGG16不可用，跳过感知损失")
-                self.perceptual_net = None
-                
-        def compute_perceptual_loss(self, real, fake):
-            if self.perceptual_net is None:
-                return torch.tensor(0.0, device=self.device, dtype=torch.float32)
-            self.perceptual_net.float()
-            real = real.float()
-            fake = fake.float()
-            if real.size(1) == 1:
-                real = real.repeat(1, 3, 1, 1)
-            if fake.size(1) == 1:
-                fake = fake.repeat(1, 3, 1, 1)
-            with torch.no_grad():
-                real_features = self.perceptual_net(real)
-            fake_features = self.perceptual_net(fake)
-            return F.mse_loss(real_features.float(), fake_features.float())
-            
-        def vae_loss(self, images):
-            try:
-                images = images.float()
-                posterior = self.vae.encode(images).latent_dist
-                latents = posterior.sample().float()
-                reconstructed = self.vae.decode(latents).sample.float()
-                recon_loss = self.mse_loss(reconstructed, images)
-                try:
-                    kl_raw = posterior.kl()
-                    if torch.isnan(kl_raw).any() or torch.isinf(kl_raw).any():
-                        print("⚠️ 检测到KL散度中的NaN/Inf值，使用替代计算方法")
-                        mean, var = posterior.mean, posterior.var
-                        eps = 1e-8
-                        kl_loss = 0.5 * torch.mean(mean.pow(2) + var - torch.log(var + eps) - 1)
-                    else:
-                        kl_loss = kl_raw.mean()
-                    if torch.isnan(kl_loss) or torch.isinf(kl_loss):
-                        print("⚠️ KL损失仍然包含NaN/Inf，使用常数替代")
-                        kl_loss = torch.tensor(0.1, device=self.device, dtype=torch.float32)
-                except Exception as kl_e:
-                    print(f"⚠️ KL散度计算错误: {kl_e}，使用替代值")
-                    kl_loss = torch.tensor(0.1, device=self.device, dtype=torch.float32)
-                if self.perceptual_net:
-                    perceptual_loss = self.compute_perceptual_loss(images, reconstructed)
-                else:
-                    perceptual_loss = torch.tensor(0.0, device=self.device, dtype=torch.float32)
-                total_loss = (
-                    self.config['reconstruction_weight'] * recon_loss +
-                    self.config['kl_weight'] * kl_loss +
-                    self.config['perceptual_weight'] * perceptual_loss
-                )
-                if torch.isnan(total_loss) or torch.isinf(total_loss):
-                    print("⚠️ 总损失包含NaN/Inf，仅使用重建损失")
-                    total_loss = self.config['reconstruction_weight'] * recon_loss
-                return {
-                    'total_loss': total_loss,
-                    'recon_loss': recon_loss,
-                    'kl_loss': kl_loss,
-                    'perceptual_loss': perceptual_loss,
-                    'reconstructed': reconstructed,
-                    'latents': latents
-                }
-            except Exception as e:
-                print(f"🔥 VAE_LOSS内部发生错误，类型: {type(e)}, 内容: {e} 🔥")
-                import traceback
-                traceback.print_exc()
-                raise e
-    
-    return KaggleVAEFineTuner(data_dir, images_dir, annotations_dir)
-
-print("DEBUG PY: Reached point 2 - Before Kaggle main() definition.")
-
-def run_kaggle_training():
-    print("DEBUG PY: Reached point 3 - Inside Kaggle main() function.")
-    print("🌐 启动云VAE Fine-tuning完整训练 (Oxford-IIIT Pet数据集)...")
+# 主函数
+def run_vae_training(data_dir=None, images_dir=None, annotations_dir=None, output_dir=None):
+    """运行VAE微调训练"""
+    print("🚀 开始VAE微调训练 (针对P100 GPU优化)...")
 
     if torch.cuda.is_available():
         torch.cuda.set_per_process_memory_fraction(0.95)
         torch.cuda.empty_cache()
         print(f"🔧 CUDA内存优化设置完成")
-
-    # Kaggle环境数据目录
-    data_dir = '/kaggle/input/dataset-test'
-    images_dir = '/kaggle/input/dataset-test/images/images'
-    annotations_dir = '/kaggle/input/dataset-test/annotations/annotations'
+    
+    # 默认路径设置
+    if data_dir is None:
+        data_dir = '/kaggle/input/dataset-test'
+    if images_dir is None:
+        images_dir = '/kaggle/input/dataset-test/images/images'
+    if annotations_dir is None:
+        annotations_dir = '/kaggle/input/dataset-test/annotations/annotations'
+    if output_dir is None:
+        output_dir = '/kaggle/working/vae_finetuned'
 
     print(f"📊 数据集路径配置:")
     print(f"  主目录: {data_dir}")
     print(f"  图像目录: {images_dir}")
     print(f"  标注目录: {annotations_dir}")
-
-    if not os.path.exists(images_dir) or not os.path.exists(annotations_dir):
-        print(f"❌ 数据集目录不存在: {images_dir} 或 {annotations_dir}")
-        return None
+    print(f"  输出目录: {output_dir}")
 
     try:
-        print("💡 使用P100 GPU高性能配置...")
-        kaggle_trainer = create_kaggle_trainer(data_dir, images_dir, annotations_dir)
-        best_loss = kaggle_trainer.finetune()
-        print(f"\n🎯 P100 GPU VAE Fine-tuning完成，最佳重建损失: {best_loss:.4f}")
-        print("💡 VAE已经适配Oxford-IIIT Pet数据集，可以用于LDM训练")
+        print("💡 使用P100 GPU优化配置...")
+        trainer = VAEFineTuner(data_dir, images_dir, annotations_dir, output_dir)
+        best_loss = trainer.finetune()
+        print(f"\n🎯 VAE微调完成，最佳重建损失: {best_loss:.4f}")
         return best_loss
     except Exception as e:
-        print("🔥 Top-level exception caught in main. Full traceback follows: 🔥")
+        print("🔥 训练过程中发生错误:")
         import traceback
         traceback.print_exc()
-        error_str_lower = str(e).lower()
-        print(f"🕵️‍♀️ 捕获到异常详情: 类型={type(e)}, 内容='{str(e)}'")
-        if "out of memory" in error_str_lower:
-            print("💡 尝试使用降级配置进行训练...")
-            try:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                gc.collect()
-                # 确保传递所有正确的路径给降级函数
-                fallback_trainer = create_ultra_low_memory_finetuner(data_dir, images_dir, annotations_dir, use_cpu=False)
-                best_loss = fallback_trainer.finetune()
-                print(f"\n🎯 降级配置VAE Fine-tuning完成，最佳重建损失: {best_loss:.4f}")
-                return best_loss
-            except Exception as fallback_e:
-                print(f"❌ 降级配置也失败了: {fallback_e}")
-                traceback.print_exc()
-                return None
-        else:
-            print(f"❌ 训练过程中出现未分类的错误: {e}")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
-            return None
+        return None
 
-print("DEBUG PY: Reached point 4 - Before if __name__ == '__main__'.")
+# 如果直接运行此脚本
 if __name__ == "__main__":
-    print("DEBUG PY: Reached point 5 - Inside if __name__ == '__main__', calling main().")
-    run_kaggle_training()
-
-# import matplotlib.pyplot as plt
+    print("VAE微调脚本已加载，请设置数据路径并调用run_vae_training()函数进行训练")
+    check_and_install_dependencies()
