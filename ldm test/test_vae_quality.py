@@ -276,14 +276,9 @@ if __name__ == '__main__':
     # 您可以在这里添加或修改要测试的模型
     test_configs = [
         {
-            "checkpoint_path": "/kaggle/input/fid-test/vae_finetuned_epoch_1.pth",
-            "output_path": "./epoch_1_quality_report.png",
-            "description": "第1轮训练的模型"
-        },
-        {
-            "checkpoint_path": "/kaggle/input/fid-test/vae_finetuned_epoch_19.pth",
-            "output_path": "./epoch_19_quality_report.png",
-            "description": "第19轮训练的模型"
+            "checkpoint_path": "/kaggle/input/fid-test2/vae_finetuned_epoch_15.pth",
+            "output_path": "./epoch_15_quality_report.png",
+            "description": "第15轮训练的模型 (优化后)"
         }
     ]
 
