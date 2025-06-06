@@ -53,6 +53,7 @@ from torchvision import transforms
 from PIL import Image
 import glob
 from sklearn.model_selection import train_test_split
+from transformers import get_scheduler
 
 # 添加混合精度训练支持
 try:
@@ -372,7 +373,8 @@ class CloudVAEFineTuner:
             'recon_loss': [],
             'kl_loss': [],
             'perceptual_loss': [],
-            'val_mse': []
+            'val_mse': [],
+            'val_epoch': []
         }
         
         # 清理初始化后的内存
@@ -792,7 +794,7 @@ class CloudVAEFineTuner:
         
         # 验证MSE
         if self.train_history['val_mse']:
-            axes[1, 1].plot(self.train_history['epoch'][::self.config['eval_every_epochs']], 
+            axes[1, 1].plot(self.train_history['val_epoch'], 
                            self.train_history['val_mse'])
             axes[1, 1].set_title('Validation MSE')
             axes[1, 1].set_xlabel('Epoch')
@@ -828,6 +830,7 @@ class CloudVAEFineTuner:
             if epoch % self.config['eval_every_epochs'] == 0 or epoch == self.config['max_epochs'] - 1:
                 val_mse, latent_stats = self.evaluate_reconstruction_quality(self.val_loader)
                 self.train_history['val_mse'].append(val_mse)
+                self.train_history['val_epoch'].append(epoch + 1)
             
             print(f"📊 Epoch {epoch+1} 结果:")
             print(f"   总损失: {train_metrics['avg_loss']:.4f}")
@@ -954,7 +957,7 @@ def create_emergency_low_memory_finetuner(data_dir):
             
             self.train_history = {
                 'epoch': [], 'train_loss': [], 'recon_loss': [],
-                'kl_loss': [], 'perceptual_loss': [], 'val_mse': []
+                'kl_loss': [], 'perceptual_loss': [], 'val_mse': [], 'val_epoch': []
             }
             
             self.clear_memory()
@@ -1038,8 +1041,8 @@ def create_kaggle_trainer(data_dir, images_dir, annotations_dir):
                 'annotations_dir': annotations_dir,
                 'save_dir': '/kaggle/working/vae_finetuned',
                 'reconstruction_weight': 1.0,
-                'kl_weight': 1e-5,
-                'perceptual_weight': 0.3,
+                'kl_weight': 1e-7,
+                'perceptual_weight': 0.1,
                 'use_perceptual_loss': True,
                 'save_every_epochs': 2,
                 'eval_every_epochs': 2,
@@ -1106,11 +1109,146 @@ def create_kaggle_trainer(data_dir, images_dir, annotations_dir):
                 print("✅ 混合精度训练已启用")
             self.train_history = {
                 'epoch': [], 'train_loss': [], 'recon_loss': [],
-                'kl_loss': [], 'perceptual_loss': [], 'val_mse': []
+                'kl_loss': [], 'perceptual_loss': [], 'val_mse': [], 'val_epoch': []
             }
             self.clear_memory()
             print("✅ Kaggle P100训练器初始化完成!")
             
+        def setup_optimizer(self):
+            """设置分层优化器，并使用带预热的学习率调度器"""
+            finetune_params = list(self.vae.decoder.parameters()) + \
+                            list(self.vae.encoder.down_blocks[-2].parameters()) + \
+                            list(self.vae.encoder.down_blocks[-1].parameters()) + \
+                            list(self.vae.quant_conv.parameters()) + \
+                            list(self.vae.post_quant_conv.parameters())
+
+            total_params = sum(p.numel() for p in finetune_params)
+            print(f"🎯 Fine-tune参数数量: {total_params:,}")
+            
+            self.optimizer = torch.optim.AdamW(
+                finetune_params,
+                lr=self.config['learning_rate'],
+                weight_decay=self.config['weight_decay']
+            )
+            
+            # 计算总训练步数
+            num_update_steps_per_epoch = len(self.train_loader) // self.config['gradient_accumulation_steps']
+            num_training_steps = self.config['max_epochs'] * num_update_steps_per_epoch
+            # 设置预热步数，例如总步数的10%
+            num_warmup_steps = int(num_training_steps * 0.1)
+
+            print(f"Scheduler: {num_training_steps} total steps, {num_warmup_steps} warmup steps.")
+
+            # 使用 transformers 提供的带预热的调度器
+            self.scheduler = get_scheduler(
+                "cosine",
+                optimizer=self.optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps,
+            )
+
+        def train_epoch(self, epoch: int):
+            """内存优化的训练epoch (适配步进式学习率调度器)"""
+            self.vae.train()
+            
+            total_loss = 0
+            total_recon = 0
+            total_kl = 0
+            total_perceptual = 0
+            num_batches = 0
+            
+            self.optimizer.zero_grad()
+            
+            pbar = tqdm(self.train_loader, desc=f"Fine-tune Epoch {epoch+1}")
+            
+            for batch_idx, batch in enumerate(pbar):
+                images, _ = batch
+                images = images.to(self.device, non_blocking=True)
+                
+                if self.config['mixed_precision']:
+                    if AUTOCAST_DEVICE:
+                        with autocast(AUTOCAST_DEVICE, dtype=torch.float16):
+                            loss_dict = self.vae_loss(images)
+                            loss = loss_dict['total_loss'] / self.config['gradient_accumulation_steps']
+                    else:
+                        with autocast():
+                            loss_dict = self.vae_loss(images)
+                            loss = loss_dict['total_loss'] / self.config['gradient_accumulation_steps']
+                    
+                    self.scaler.scale(loss.float()).backward()
+                else:
+                    loss_dict = self.vae_loss(images)
+                    loss = loss_dict['total_loss'] / self.config['gradient_accumulation_steps']
+                    loss.backward()
+                
+                if (batch_idx + 1) % self.config['gradient_accumulation_steps'] == 0:
+                    try:
+                        if self.config['mixed_precision']:
+                            self.scaler.unscale_(self.optimizer)
+                            torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
+                            self.scaler.step(self.optimizer)
+                            self.scaler.update()
+                        else:
+                            torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
+                            self.optimizer.step()
+                        
+                        self.scheduler.step() # 更新学习率
+                        self.optimizer.zero_grad()
+                        
+                    except RuntimeError as grad_e:
+                        if "dtype" in str(grad_e).lower() or "type" in str(grad_e).lower():
+                            print(f"⚠️ 梯度步骤数据类型错误，跳过此步骤: {grad_e}")
+                            self.optimizer.zero_grad()
+                            continue
+                        else:
+                            raise grad_e
+                
+                actual_loss = loss.item() * self.config['gradient_accumulation_steps']
+                total_loss += actual_loss
+                total_recon += loss_dict['recon_loss'].item()
+                total_kl += loss_dict['kl_loss'].item()
+                total_perceptual += loss_dict['perceptual_loss'].item()
+                num_batches += 1
+                
+                pbar.set_postfix({
+                    'Loss': f'{actual_loss:.4f}',
+                    'Recon': f'{loss_dict["recon_loss"].item():.4f}',
+                    'KL': f'{loss_dict["kl_loss"].item():.4f}',
+                    'Perc': f'{loss_dict["perceptual_loss"].item():.4f}'
+                })
+                
+                if batch_idx == 0:
+                    self.save_reconstruction_samples(
+                        images, loss_dict['reconstructed'], epoch
+                    )
+                
+                if batch_idx % 20 == 0:
+                    del images, loss_dict, loss
+                    self.clear_memory()
+            
+            if (len(self.train_loader)) % self.config['gradient_accumulation_steps'] != 0:
+                if self.config['mixed_precision']:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    torch.nn.utils.clip_grad_norm_(self.vae.parameters(), max_norm=1.0)
+                    self.optimizer.step()
+                
+                self.scheduler.step() # 更新学习率
+                self.optimizer.zero_grad()
+            
+            avg_metrics = {
+                'avg_loss': total_loss / num_batches,
+                'avg_recon': total_recon / num_batches,
+                'avg_kl': total_kl / num_batches,
+                'avg_perceptual': total_perceptual / num_batches
+            }
+            
+            self.clear_memory()
+            return avg_metrics
+
         def setup_perceptual_loss(self):
             if not self.config['use_perceptual_loss']:
                 print("🚫 感知损失已禁用")
