@@ -861,5 +861,19 @@ def run_vae_training(data_dir=None, images_dir=None, annotations_dir=None, outpu
 
 # 如果直接运行此脚本
 if __name__ == "__main__":
-    print("VAE微调脚本已加载，请设置数据路径并调用run_vae_training()函数进行训练")
+    print("VAE微调脚本已加载，开始执行训练...")
     check_and_install_dependencies()
+    
+    # Kaggle环境默认路径
+    data_dir = '/kaggle/input/dataset-test'
+    images_dir = '/kaggle/input/dataset-test/images/images'
+    annotations_dir = '/kaggle/input/dataset-test/annotations/annotations'
+    output_dir = '/kaggle/working/vae_finetuned'
+    
+    # 自动开始训练
+    run_vae_training(
+        data_dir=data_dir,
+        images_dir=images_dir,
+        annotations_dir=annotations_dir,
+        output_dir=output_dir
+    )
