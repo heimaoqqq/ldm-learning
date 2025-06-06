@@ -85,7 +85,9 @@ def test_vae(args):
     print(f"💾 加载您微调过的VAE权重从: {args.checkpoint_path}")
     try:
         checkpoint = torch.load(args.checkpoint_path, map_location=device)
-        if 'vae_state_dict' in checkpoint:
+        if 'model_state_dict' in checkpoint: # 兼容新的训练脚本格式
+            vae.load_state_dict(checkpoint['model_state_dict'])
+        elif 'vae_state_dict' in checkpoint: # 兼容旧的训练脚本格式
             vae.load_state_dict(checkpoint['vae_state_dict'])
         else:
             # 兼容直接保存state_dict的情况
