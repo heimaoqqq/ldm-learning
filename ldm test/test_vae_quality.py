@@ -15,50 +15,6 @@ from tqdm import tqdm
 
 # --- Helper Functions and Classes ---
 
-def check_and_install_dependencies():
-    """检查并安装必要的依赖，并强制使用与Kaggle环境兼容的、版本固定的核心库。"""
-    try:
-        import torch
-        import numpy as np
-        import diffusers
-        import accelerate
-        import huggingface_hub
-        
-        # 验证所有关键库的版本
-        torch_ok = torch.__version__.startswith("2.1.2")
-        numpy_ok = np.__version__.startswith("1.26.4")
-        diffusers_ok = diffusers.__version__.startswith("0.25.1")
-        accelerate_ok = accelerate.__version__.startswith("0.25.0")
-        hub_ok = huggingface_hub.__version__.startswith("0.22.2")
-        
-        if torch_ok and numpy_ok and diffusers_ok and accelerate_ok and hub_ok:
-             print("✅ 所有依赖已安装且版本兼容。")
-             return
-        else:
-            # 如果任一版本不对，触发重新安装流程
-            raise ImportError(f"检测到版本不匹配，将执行环境修复。")
-
-    except ImportError as e:
-        print(f"📦 检测到依赖问题: {e}")
-        print("   将开始修复流程...")
-        
-        # 定义安装命令，所有核心库都固定版本
-        # 这是为了确保一个稳定且完全兼容的环境
-        install_cmd = "pip install --upgrade --force-reinstall torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu121 && " \
-                      "pip install --upgrade --force-reinstall diffusers==0.25.1 transformers==4.36.2 accelerate==0.25.0 scikit-image==0.22.0 " \
-                      "torch-fidelity==0.3.0 tqdm==4.66.1 numpy==1.26.4 huggingface-hub==0.22.2"
-
-        print("   正在执行环境修复，将所有核心库固定到兼容版本... (此过程可能需要几分钟)")
-        os.system(install_cmd)
-        
-        print("\n" + "="*50)
-        print("✅ 依赖修复完成。")
-        print("🛑 请务必重新运行此脚本/单元格以使更改生效。")
-        print("="*50)
-        
-        import sys
-        sys.exit(0)
-
 class KaggleOxfordPetDataset(torch.utils.data.Dataset):
     """
     适配Kaggle路径的Oxford-IIIT Pet数据集类
@@ -316,9 +272,6 @@ def test_vae(args):
 
 
 if __name__ == '__main__':
-    # 首先检查依赖
-    check_and_install_dependencies()
-
     # --- 为Kaggle环境定制的批量测试配置 ---
     # 您可以在这里添加或修改要测试的模型
     test_configs = [
