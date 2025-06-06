@@ -16,32 +16,41 @@ from tqdm import tqdm
 # --- Helper Functions and Classes ---
 
 def check_and_install_dependencies():
-    """检查并安装必要的依赖，并强制使用与Kaggle环境兼容的PyTorch版本。"""
+    """检查并安装必要的依赖，并强制使用与Kaggle环境兼容的PyTorch和NumPy版本。"""
     try:
-        # 简单检查几个关键库
+        import torch
+        import numpy as np
         import diffusers
         import torch_fidelity
-        import torch
-        # 验证PyTorch版本是否是我们期望的稳定版本
-        if torch.__version__.startswith("2.1.2"):
+        
+        # 验证版本
+        torch_ok = torch.__version__.startswith("2.1.2")
+        # 确保NumPy版本是1.x
+        numpy_ok = int(np.__version__.split('.')[0]) < 2
+        
+        if torch_ok and numpy_ok:
              print("✅ 所有依赖已安装且版本兼容。")
              return
         else:
             # 如果版本不对，触发重新安装流程
-            raise ImportError(f"PyTorch版本不匹配 (当前: {torch.__version__}), 需要修复。")
+            error_msg = []
+            if not torch_ok: error_msg.append(f"PyTorch (当前: {torch.__version__}, 需要: 2.1.2.x)")
+            if not numpy_ok: error_msg.append(f"NumPy (当前: {np.__version__}, 需要: <2.0)")
+            raise ImportError(f"版本不匹配: {', '.join(error_msg)}")
 
     except ImportError as e:
         print(f"📦 检测到依赖问题: {e}")
         print("   将开始修复流程...")
         
         # 定义安装命令
+        # 强制安装 NumPy < 2.0 来解决 ABI 兼容性问题
         pytorch_install_cmd = "pip install --upgrade --force-reinstall torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu121 -q"
-        other_deps_install_cmd = "pip install diffusers transformers accelerate scikit-image torch-fidelity tqdm -q"
+        other_deps_install_cmd = "pip install diffusers transformers accelerate scikit-image torch-fidelity tqdm numpy==1.26.4 -q"
 
-        print("   第一步: 强制重装与Kaggle CUDA 12.1 兼容的PyTorch版本... (此过程可能需要几分钟)")
+        print("   第一步: 强制重装与Kaggle CUDA 12.1 兼容的PyTorch版本...")
         os.system(pytorch_install_cmd)
         
-        print("   第二步: 安装其他必要的库...")
+        print("   第二步: 安装其他必要的库并固定NumPy版本到1.26.4...")
         os.system(other_deps_install_cmd)
         
         print("\n" + "="*50)
@@ -49,7 +58,6 @@ def check_and_install_dependencies():
         print("🛑 请务必重新运行此脚本/单元格以使更改生效。")
         print("="*50)
         
-        # 退出脚本，强制用户重新运行
         import sys
         sys.exit(0)
 
