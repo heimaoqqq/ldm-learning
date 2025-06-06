@@ -85,8 +85,8 @@ print("DEBUG PY: Reached point 1 - After initial setup and mixed precision check
 class OxfordPetDataset(Dataset):
     """Oxford-IIIT Pet数据集类"""
     
-    def __init__(self, data_root, annotation_file, transform=None):
-        self.data_root = data_root
+    def __init__(self, images_dir, annotation_file, transform=None):
+        self.images_dir = images_dir
         self.transform = transform
         
         # 加载标注文件
@@ -108,12 +108,12 @@ class OxfordPetDataset(Dataset):
     
     def __getitem__(self, idx):
         image_id, class_id = self.samples[idx]
-        img_path = os.path.join(self.data_root, "images", f"{image_id}.jpg")
+        img_path = os.path.join(self.images_dir, f"{image_id}.jpg")
         
         # 有些图像可能没有扩展名，尝试其他可能的扩展名
         if not os.path.exists(img_path):
             for ext in ['.jpeg', '.png', '.JPEG', '.PNG']:
-                alt_path = os.path.join(self.data_root, "images", f"{image_id}{ext}")
+                alt_path = os.path.join(self.images_dir, f"{image_id}{ext}")
                 if os.path.exists(alt_path):
                     img_path = alt_path
                     break
@@ -129,60 +129,50 @@ class OxfordPetDataset(Dataset):
             placeholder = torch.zeros((3, 256, 256))
             return placeholder, class_id
 
-def build_pet_dataloader(root_dir, batch_size=8, num_workers=0, val_split=0.2):
-    """构建Oxford-IIIT Pet数据集的加载器"""
-    print(f"🔍 加载Oxford-IIIT Pet数据集: {root_dir}")
-    
+def build_pet_dataloader(root_dir, images_dir, annotations_dir, batch_size=8, num_workers=0, val_split=0.2):
+    """构建Oxford Pet数据集的数据加载器"""
     transform = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
     
-    # 检查数据集目录结构
-    train_annotation_file = os.path.join(root_dir, "annotations", "trainval.txt")
-    test_annotation_file = os.path.join(root_dir, "annotations", "test.txt")
+    # 更新日志并确保使用 list.txt
+    print(f"📁 加载Oxford-IIIT Pet数据集...")
+    annotation_file = os.path.join(annotations_dir, "list.txt")
     
-    if not os.path.exists(root_dir):
-        raise ValueError(f"❌ 数据集目录不存在: {root_dir}")
-    
-    if not os.path.exists(train_annotation_file) or not os.path.exists(test_annotation_file):
-        raise ValueError(f"❌ 标注文件不存在")
-    
-    # 加载训练和验证集
-    train_val_dataset = OxfordPetDataset(
-        data_root=root_dir,
-        annotation_file=train_annotation_file,
+    dataset = OxfordPetDataset(
+        images_dir=images_dir,
+        annotation_file=annotation_file,
         transform=transform
     )
     
-    # 分割训练集和验证集
-    train_size = int(len(train_val_dataset) * (1 - val_split))
-    val_size = len(train_val_dataset) - train_size
+    # 分割数据集
+    train_size = int(len(dataset) * (1 - val_split))
+    val_size = len(dataset) - train_size
+    
     train_dataset, val_dataset = torch.utils.data.random_split(
-        train_val_dataset, [train_size, val_size], 
+        dataset, [train_size, val_size],
         generator=torch.Generator().manual_seed(42)
     )
     
-    # 创建数据加载器
     train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        shuffle=True, 
-        num_workers=num_workers, 
-        pin_memory=True if torch.cuda.is_available() else False,
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
         drop_last=True
     )
     
     val_loader = DataLoader(
-        val_dataset, 
-        batch_size=batch_size, 
-        shuffle=False, 
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
         num_workers=num_workers,
-        pin_memory=True if torch.cuda.is_available() else False
+        pin_memory=True
     )
     
-    print(f"📊 数据集统计:")
     print(f"  训练集: {len(train_dataset)} 张图片")
     print(f"  验证集: {len(val_dataset)} 张图片")
     
