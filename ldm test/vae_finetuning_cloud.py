@@ -305,7 +305,7 @@ class VAEFineTuner:
             'gradient_accumulation_steps': 2,
             'learning_rate': 1e-5,
             'weight_decay': 0.01,
-            'max_epochs': 20,
+            'max_epochs': 16,
             'data_dir': data_dir,
             'images_dir': images_dir,
             'annotations_dir': annotations_dir,
