@@ -129,7 +129,7 @@ class OxfordPetDataset(Dataset):
             placeholder = torch.zeros((3, 256, 256))
             return placeholder, class_id
 
-def build_pet_dataloader(root_dir, images_dir, annotations_dir, batch_size=8, num_workers=0, val_split=0.2):
+def build_pet_dataloader(images_dir, annotations_dir, batch_size=8, num_workers=0, val_split=0.2):
     """构建Oxford Pet数据集的数据加载器"""
     transform = transforms.Compose([
         transforms.Resize((256, 256)),
@@ -157,18 +157,18 @@ def build_pet_dataloader(root_dir, images_dir, annotations_dir, batch_size=8, nu
     )
     
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        num_workers=num_workers, 
         pin_memory=True,
         drop_last=True
     )
     
     val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
+        val_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
         num_workers=num_workers,
         pin_memory=True
     )
@@ -178,114 +178,9 @@ def build_pet_dataloader(root_dir, images_dir, annotations_dir, batch_size=8, nu
     
     return train_loader, val_loader, len(train_dataset), len(val_dataset)
 
-class CloudGaitDataset(Dataset):
-    """云环境数据集类"""
-    
-    def __init__(self, image_paths, class_ids, transform=None):
-        self.image_paths = image_paths
-        self.class_ids = class_ids
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.image_paths)
-
-    def __getitem__(self, idx):
-        img_path = self.image_paths[idx]
-        image = Image.open(img_path).convert('RGB')
-        if self.transform:
-            image = self.transform(image)
-        label = self.class_ids[idx]
-        
-        # 确保标签在有效范围内
-        if label < 0 or label > 30:
-            label = max(0, min(30, label))
-        
-        return image, label
-
-def build_cloud_dataloader(root_dir, batch_size=8, num_workers=0, val_split=0.3):
-    """内存优化的云环境数据加载器"""
-    print(f"🔍 扫描云数据集目录: {root_dir}")
-    
-    transform = transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    ])
-
-    all_image_paths = []
-    all_class_ids = []
-    
-    # 检查目录结构
-    if not os.path.exists(root_dir):
-        raise ValueError(f"❌ 数据集目录不存在: {root_dir}")
-    
-    # 支持ID_1, ID_2, ... ID_31文件夹结构
-    id_folders = []
-    for item in os.listdir(root_dir):
-        item_path = os.path.join(root_dir, item)
-        if os.path.isdir(item_path) and item.startswith('ID_'):
-            id_folders.append(item)
-    
-    if id_folders:
-        print(f"📁 发现ID文件夹结构: {len(id_folders)} 个文件夹")
-        
-        for folder_name in sorted(id_folders):
-            folder_path = os.path.join(root_dir, folder_name)
-            
-            try:
-                # 提取类别ID
-                class_id = int(folder_name.split('_')[1]) - 1  # 转换为0-based
-                
-                if not (0 <= class_id <= 30):
-                    print(f"⚠️  跳过超出范围的类别: {folder_name}")
-                    continue
-                
-                # 收集图片
-                folder_images = []
-                for ext in ["*.jpg", "*.jpeg", "*.png", "*.bmp"]:
-                    folder_images.extend(glob.glob(os.path.join(folder_path, ext)))
-                
-                print(f"  {folder_name}: {len(folder_images)} 张图片")
-                
-                all_image_paths.extend(folder_images)
-                all_class_ids.extend([class_id] * len(folder_images))
-                
-            except (ValueError, IndexError) as e:
-                print(f"⚠️  无法解析文件夹名 {folder_name}: {e}")
-                continue
-
-    if not all_image_paths:
-        raise ValueError(f"❌ 在 {root_dir} 中没有找到图片文件")
-
-    print(f"📊 数据集统计:")
-    print(f"  总图片数: {len(all_image_paths)}")
-    print(f"  类别数: {len(set(all_class_ids))}")
-
-    # 数据集划分
-    train_paths, val_paths, train_ids, val_ids = train_test_split(
-        all_image_paths, all_class_ids, 
-        test_size=val_split, 
-        random_state=42,
-        stratify=all_class_ids if len(set(all_class_ids)) > 1 else None
-    )
-
-    print(f"  训练集: {len(train_paths)} 张")
-    print(f"  验证集: {len(val_paths)} 张")
-
-    # 创建数据集和加载器
-    train_dataset = CloudGaitDataset(train_paths, train_ids, transform=transform)
-    val_dataset = CloudGaitDataset(val_paths, val_ids, transform=transform)
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
-                             num_workers=num_workers, pin_memory=True if torch.cuda.is_available() else False)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, 
-                           num_workers=num_workers, pin_memory=True if torch.cuda.is_available() else False)
-    
-    return train_loader, val_loader, len(train_dataset), len(val_dataset)
-
 class VAEFineTuner:
     """优化的VAE微调器，专为P100 GPU设计"""
-    def __init__(self, data_dir, images_dir, annotations_dir, output_dir='/kaggle/working/vae_finetuned'):
+    def __init__(self, images_dir, annotations_dir, output_dir='/kaggle/working/vae_finetuned'):
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"🚀 VAE Fine-tuning 设备: {self.device}")
         
@@ -296,7 +191,6 @@ class VAEFineTuner:
             'learning_rate': 1e-5,
             'weight_decay': 0.01,
             'max_epochs': 16,
-            'data_dir': data_dir,
             'images_dir': images_dir,
             'annotations_dir': annotations_dir,
             'save_dir': output_dir,
@@ -316,7 +210,6 @@ class VAEFineTuner:
         
         # 数据加载器
         self.train_loader, self.val_loader, train_size, val_size = build_pet_dataloader(
-            root_dir=self.config['data_dir'],
             images_dir=self.config['images_dir'],
             annotations_dir=self.config['annotations_dir'],
             batch_size=self.config['batch_size'],
@@ -367,7 +260,7 @@ class VAEFineTuner:
                         list(self.vae.encoder.down_blocks[-1].parameters()) + \
                         list(self.vae.quant_conv.parameters()) + \
                         list(self.vae.post_quant_conv.parameters())
-
+        
         total_params = sum(p.numel() for p in finetune_params)
         print(f"🎯 Fine-tune参数数量: {total_params:,}")
         
@@ -413,7 +306,7 @@ class VAEFineTuner:
         except:
             print("⚠️  VGG16不可用，跳过感知损失")
             self.perceptual_net = None
-            
+    
     def compute_perceptual_loss(self, real, fake):
         """计算感知损失"""
         if self.perceptual_net is None:
@@ -441,7 +334,7 @@ class VAEFineTuner:
             posterior = self.vae.encode(images).latent_dist
             latents = posterior.sample().float()
             reconstructed = self.vae.decode(latents).sample.float()
-            
+
             # 重建损失
             recon_loss = self.mse_loss(reconstructed, images)
             
@@ -645,16 +538,15 @@ class VAEFineTuner:
                 posterior = self.vae.encode(images).latent_dist
                 latents = posterior.sample()
                 reconstructions = self.vae.decode(latents).sample
-                
+            
                 # 计算MSE
                 mse = F.mse_loss(reconstructions, images, reduction='none').mean([1, 2, 3])
                 total_mse += mse.sum().item()
                 total_samples += images.size(0)
-                
+            
                 # 收集潜在空间统计信息
                 latent_means.append(posterior.mean.cpu().flatten(1).mean(0).numpy())
                 latent_stds.append(posterior.var.sqrt().cpu().flatten(1).mean(0).numpy())
-                
             except RuntimeError as e:
                 print(f"⚠️ 评估中的CUDA错误: {e}")
                 self.clear_memory()
@@ -672,19 +564,19 @@ class VAEFineTuner:
         
         return avg_mse, latent_stats
     
-    def save_finetuned_vae(self, epoch, metrics):
-        """保存微调后的VAE模型"""
+    def save_finetuned_vae(self, epoch):
+        """以diffusers兼容的格式保存微调后的VAE模型"""
         try:
-            model_path = f"{self.config['save_dir']}/vae_finetuned_epoch_{epoch+1}.pth"
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': self.vae.state_dict(),
-                'metrics': metrics,
-                'config': self.config
-            }, model_path)
-            print(f"💾 保存模型到 {model_path}")
+            # 模型将保存到一个目录中, e.g., /.../vae_finetuned_epoch_3/
+            model_path = os.path.join(self.config['save_dir'], f"vae_finetuned_epoch_{epoch+1}")
+            self.vae.save_pretrained(model_path)
+            print(f"💾 VAE模型已保存到目录: {model_path}")
+            return model_path
         except Exception as e:
             print(f"❌ 保存模型失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
     
     def plot_training_history(self):
         """绘制训练历史"""
@@ -763,35 +655,37 @@ class VAEFineTuner:
             print(f"   当前学习率: {current_lr:.2e}")
             
             # 保存最佳模型逻辑
-            current_epoch_model_path = f'{self.config["save_dir"]}/vae_finetuned_epoch_{epoch+1}.pth'
             is_best_model_save = False
             if train_metrics['avg_recon'] < best_recon_loss:
                 best_recon_loss = train_metrics['avg_recon']
                 
-                # 尝试删除上一个被标记为"最佳"的模型文件
-                if self.best_model_checkpoint_path and os.path.exists(self.best_model_checkpoint_path):
+                # 尝试删除上一个被标记为"最佳"的模型目录
+                if self.best_model_checkpoint_path and os.path.isdir(self.best_model_checkpoint_path):
                     try:
-                        # 从文件名提取旧的epoch号
-                        old_epoch_str = self.best_model_checkpoint_path.split('_epoch_')[-1].split('.pth')[0]
-                        old_epoch_idx = int(old_epoch_str) - 1  # epoch号转为0-indexed
+                        import shutil
+                        # 从目录名提取旧的epoch号
+                        old_epoch_str = self.best_model_checkpoint_path.split('_epoch_')[-1]
+                        old_epoch_idx = int(old_epoch_str) - 1
+                        
                         is_periodic_save = (old_epoch_idx % self.config['save_every_epochs'] == 0)
                         
                         if not is_periodic_save:
-                            print(f"🗑️ 删除旧的最佳模型: {self.best_model_checkpoint_path}")
-                            os.remove(self.best_model_checkpoint_path)
+                            print(f"🗑️ 删除旧的最佳模型目录: {self.best_model_checkpoint_path}")
+                            shutil.rmtree(self.best_model_checkpoint_path)
                         else:
                             print(f"ℹ️ 保留旧的最佳模型 (同时也是定期保存点): {self.best_model_checkpoint_path}")
                     except Exception as e_remove:
-                        print(f"⚠️ 无法删除或检查旧的最佳模型: {e_remove}")
+                        print(f"⚠️ 无法删除或检查旧的最佳模型目录: {e_remove}")
 
-                self.save_finetuned_vae(epoch, train_metrics)  # 保存当前模型
-                self.best_model_checkpoint_path = current_epoch_model_path  # 更新最佳模型路径
-                print(f"✅ 保存新的最佳模型 (重建损失: {best_recon_loss:.4f}): {current_epoch_model_path}")
+                saved_path = self.save_finetuned_vae(epoch)  # 保存当前模型
+                if saved_path:
+                    self.best_model_checkpoint_path = saved_path  # 更新最佳模型路径
+                    print(f"✅ 保存新的最佳模型 (重建损失: {best_recon_loss:.4f}): {self.best_model_checkpoint_path}")
                 is_best_model_save = True
             
             if epoch % self.config['save_every_epochs'] == 0:
                 if not is_best_model_save:  # 如果此epoch已作为最佳模型保存，则不再重复保存
-                    self.save_finetuned_vae(epoch, train_metrics)
+                    self.save_finetuned_vae(epoch)
                 self.plot_training_history()
             
             print(f"🏆 当前最佳重建损失: {best_recon_loss:.4f}")
@@ -812,7 +706,7 @@ class VAEFineTuner:
         return best_recon_loss
 
 # 主函数
-def run_vae_training(data_dir=None, images_dir=None, annotations_dir=None, output_dir=None):
+def run_vae_training(images_dir=None, annotations_dir=None, output_dir=None):
     """运行VAE微调训练"""
     print("🚀 开始VAE微调训练 (针对P100 GPU优化)...")
 
@@ -820,10 +714,8 @@ def run_vae_training(data_dir=None, images_dir=None, annotations_dir=None, outpu
         torch.cuda.set_per_process_memory_fraction(0.95)
         torch.cuda.empty_cache()
         print(f"🔧 CUDA内存优化设置完成")
-    
+
     # 默认路径设置
-    if data_dir is None:
-        data_dir = '/kaggle/input/dataset-test'
     if images_dir is None:
         images_dir = '/kaggle/input/dataset-test/images/images'
     if annotations_dir is None:
@@ -832,14 +724,13 @@ def run_vae_training(data_dir=None, images_dir=None, annotations_dir=None, outpu
         output_dir = '/kaggle/working/vae_finetuned'
 
     print(f"📊 数据集路径配置:")
-    print(f"  主目录: {data_dir}")
     print(f"  图像目录: {images_dir}")
     print(f"  标注目录: {annotations_dir}")
     print(f"  输出目录: {output_dir}")
 
     try:
         print("💡 使用P100 GPU优化配置...")
-        trainer = VAEFineTuner(data_dir, images_dir, annotations_dir, output_dir)
+        trainer = VAEFineTuner(images_dir, annotations_dir, output_dir)
         best_loss = trainer.finetune()
         print(f"\n🎯 VAE微调完成，最佳重建损失: {best_loss:.4f}")
         return best_loss
@@ -852,17 +743,14 @@ def run_vae_training(data_dir=None, images_dir=None, annotations_dir=None, outpu
 # 如果直接运行此脚本
 if __name__ == "__main__":
     print("VAE微调脚本已加载，开始执行训练...")
-    check_and_install_dependencies()
     
     # Kaggle环境默认路径
-    data_dir = '/kaggle/input/dataset-test'
     images_dir = '/kaggle/input/dataset-test/images/images'
     annotations_dir = '/kaggle/input/dataset-test/annotations/annotations'
     output_dir = '/kaggle/working/vae_finetuned'
     
     # 自动开始训练
     run_vae_training(
-        data_dir=data_dir,
         images_dir=images_dir,
         annotations_dir=annotations_dir,
         output_dir=output_dir
